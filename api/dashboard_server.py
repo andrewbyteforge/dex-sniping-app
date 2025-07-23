@@ -136,19 +136,63 @@ async def get_opportunities() -> List[OpportunityResponse]:
             try:
                 age_minutes = (datetime.now() - opp.detected_at).total_seconds() / 60
                 
+                # Safe extraction of liquidity_usd
+                liquidity_usd = 0.0
+                try:
+                    if hasattr(opp.liquidity, 'liquidity_usd') and opp.liquidity.liquidity_usd is not None:
+                        liquidity_usd = float(opp.liquidity.liquidity_usd)
+                except Exception as liq_error:
+                    dashboard_server.logger.debug(f"Error extracting liquidity_usd: {liq_error}")
+                
+                # Safe extraction of other fields
+                token_symbol = "UNKNOWN"
+                try:
+                    if hasattr(opp.token, 'symbol') and opp.token.symbol:
+                        token_symbol = str(opp.token.symbol)
+                except Exception:
+                    pass
+                
+                token_address = ""
+                try:
+                    if hasattr(opp.token, 'address') and opp.token.address:
+                        token_address = str(opp.token.address)
+                except Exception:
+                    pass
+                
+                chain = "ethereum"
+                try:
+                    chain = str(opp.metadata.get("chain", "ethereum"))
+                except Exception:
+                    pass
+                
+                risk_level = "unknown"
+                try:
+                    if hasattr(opp.contract_analysis, 'risk_level') and opp.contract_analysis.risk_level:
+                        risk_level = str(opp.contract_analysis.risk_level.value)
+                except Exception:
+                    pass
+                
+                recommendation_data = opp.metadata.get("recommendation", {})
+                recommendation = str(recommendation_data.get("action", "UNKNOWN"))
+                confidence = str(recommendation_data.get("confidence", "UNKNOWN"))
+                score = float(recommendation_data.get("score", 0.0))
+                
                 opportunities.append(OpportunityResponse(
-                    token_symbol=opp.token.symbol or "UNKNOWN",
-                    token_address=opp.token.address,
-                    chain=opp.metadata.get("chain", "ethereum"),
-                    risk_level=opp.contract_analysis.risk_level.value,
-                    recommendation=opp.metadata.get("recommendation", {}).get("action", "UNKNOWN"),
-                    confidence=opp.metadata.get("recommendation", {}).get("confidence", "UNKNOWN"),
-                    score=opp.metadata.get("recommendation", {}).get("score", 0.0),
-                    liquidity_usd=opp.liquidity.liquidity_usd,
+                    token_symbol=token_symbol,
+                    token_address=token_address,
+                    chain=chain,
+                    risk_level=risk_level,
+                    recommendation=recommendation,
+                    confidence=confidence,
+                    score=score,
+                    liquidity_usd=liquidity_usd,
                     age_minutes=int(age_minutes)
                 ))
+                
+                dashboard_server.logger.debug(f"API opportunity: {token_symbol} - Liquidity: {liquidity_usd}")
+                
             except Exception as opp_error:
-                dashboard_server.logger.debug(f"Error processing opportunity: {opp_error}")
+                dashboard_server.logger.error(f"Error processing opportunity for API: {opp_error}")
                 continue
             
         return opportunities

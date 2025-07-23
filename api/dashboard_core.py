@@ -69,9 +69,15 @@ class DashboardServer:
         disconnected_clients = []
         
         try:
+            # Debug logging for new opportunities
+            if message.get("type") == "new_opportunity":
+                data = message.get("data", {})
+                self.logger.debug(f"Broadcasting opportunity: {data.get('token_symbol')} - Liquidity: {data.get('liquidity_usd')} (type: {type(data.get('liquidity_usd'))})")
+                
             message_str = json.dumps(message)
         except Exception as json_error:
             self.logger.error(f"Error serializing message: {json_error}")
+            self.logger.error(f"Message content: {message}")
             return
         
         for client in self.connected_clients.copy():
