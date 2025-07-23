@@ -1,6 +1,7 @@
+# api/dashboard_server.py (Complete Updated Version)
 """
-Simplified and fixed dashboard server for DEX sniping system.
-Focuses on reliability and basic functionality with comprehensive error handling.
+FastAPI server providing REST API and WebSocket for the dashboard interface.
+Connects the web dashboard to the trading execution system with watchlist support.
 """
 
 import asyncio
@@ -11,18 +12,48 @@ from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
+
+from models.token import TradingOpportunity, RiskLevel, TokenInfo, LiquidityInfo, ContractAnalysis, SocialMetrics
 from models.watchlist import watchlist_manager, WatchlistStatus
+from utils.logger import logger_manager
 
-# Simple logging without complex dependencies
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("DashboardServer")
+# Pydantic models for API
+class TradeRequest(BaseModel):
+    """Request model for trade execution."""
+    token_address: str
+    token_symbol: str
+    amount: float
+    chain: str = "ethereum"
+    order_type: str = "market"
 
-# Create FastAPI app with minimal config
+class OpportunityResponse(BaseModel):
+    """Response model for opportunities."""
+    token_symbol: str
+    token_address: str
+    chain: str
+    risk_level: str
+    recommendation: str
+    confidence: str
+    score: float
+    liquidity_usd: float
+    age_minutes: int
+
+class WatchlistAddRequest(BaseModel):
+    """Request model for adding to watchlist."""
+    token_address: str
+    token_symbol: str
+    chain: str
+    reason: str = "Manual addition"
+    target_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    notes: str = ""
+
+# Create FastAPI app
 app = FastAPI(
     title="DEX Sniping Dashboard",
-    version="1.0.0",
+    version="2.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc"
 )
@@ -36,18 +67,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-
-class SimpleDashboardServer:
+class DashboardServer:
     """
-    Simplified dashboard server with minimal dependencies and comprehensive error handling.
-    Focuses on reliability and basic functionality for DEX sniping operations.
+    Dashboard server that provides API endpoints and WebSocket connections
+    for real-time communication with the trading system.
     """
     
     def __init__(self):
-        """Initialize the simple dashboard server."""
+        """Initialize the dashboard server."""
+        self.logger = logger_manager.get_logger("DashboardServer")
+        self.trading_executor = None
+        self.position_manager = None
+        self.risk_manager = None
         self.connected_clients: List[WebSocket] = []
-        self.opportunities: List[Dict] = []
+        self.opportunities_queue: List[TradingOpportunity] = []
+        
+        # Statistics
         self.stats = {
             "total_opportunities": 0,
             "high_confidence": 0,
@@ -56,187 +91,147 @@ class SimpleDashboardServer:
             "uptime_start": datetime.now()
         }
         
-        # Trading components (will be set by main system)
-        self.trading_executor = None
-        self.risk_manager = None
-        self.position_manager = None
-        
-        logger.info("Simple dashboard server initialized")
-
-    async def initialize(self):
+    async def initialize(self) -> None:
         """
         Initialize the dashboard server.
         
-        Returns:
-            None
-            
         Raises:
             Exception: If initialization fails
         """
         try:
-            logger.info("Dashboard server ready")
+            self.logger.info("Initializing dashboard server...")
+            # Start periodic cleanup task
+            asyncio.create_task(self._periodic_cleanup_task())
+            self.logger.info("Dashboard server initialized successfully")
         except Exception as e:
-            logger.error(f"Dashboard initialization error: {e}")
+            self.logger.error(f"Failed to initialize dashboard server: {e}")
             raise
 
-    async def add_opportunity(self, opportunity):
+    async def broadcast_message(self, message: Dict[str, Any]) -> None:
         """
-        Add opportunity with comprehensive error handling and data validation.
+        Broadcast message to all connected WebSocket clients.
         
         Args:
-            opportunity: The trading opportunity object to add
-            
-        Returns:
-            None
-            
-        Raises:
-            Exception: If opportunity processing fails completely
-        """
-        try:
-            # Convert opportunity to simple dict with safe attribute access
-            if hasattr(opportunity, 'token'):
-                opp_data = {
-                    'token_symbol': getattr(opportunity.token, 'symbol', 'UNKNOWN'),
-                    'token_address': getattr(opportunity.token, 'address', 'unknown'),
-                    'chain': opportunity.metadata.get('chain', 'unknown') if hasattr(opportunity, 'metadata') else 'unknown',
-                    'detected_at': datetime.now().isoformat(),
-                    'risk_level': 'unknown',
-                    'recommendation': 'UNKNOWN',
-                    'confidence': 'UNKNOWN',
-                    'score': 0.0,
-                    'liquidity_usd': 0
-                }
-                
-                # Try to get additional data safely with individual error handling
-                try:
-                    if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
-                        opp_data['liquidity_usd'] = float(getattr(opportunity.liquidity, 'liquidity_usd', 0) or 0)
-                        opp_data['dex_name'] = getattr(opportunity.liquidity, 'dex_name', 'Unknown')
-                        opp_data['pair_address'] = getattr(opportunity.liquidity, 'pair_address', 'unknown')
-                except Exception as liquidity_error:
-                    logger.debug(f"Error extracting liquidity data: {liquidity_error}")
-                
-                try:
-                    if hasattr(opportunity, 'contract_analysis') and opportunity.contract_analysis:
-                        risk_level = getattr(opportunity.contract_analysis, 'risk_level', None)
-                        if risk_level and hasattr(risk_level, 'value'):
-                            opp_data['risk_level'] = risk_level.value
-                        elif risk_level:
-                            opp_data['risk_level'] = str(risk_level)
-                except Exception as contract_error:
-                    logger.debug(f"Error extracting contract analysis: {contract_error}")
-                
-                try:
-                    if hasattr(opportunity, 'metadata') and isinstance(opportunity.metadata, dict):
-                        recommendation = opportunity.metadata.get('recommendation', {})
-                        if isinstance(recommendation, dict):
-                            opp_data['recommendation'] = recommendation.get('action', 'UNKNOWN')
-                            opp_data['confidence'] = recommendation.get('confidence', 'UNKNOWN')
-                            opp_data['score'] = float(recommendation.get('score', 0.0))
-                            opp_data['reasons'] = recommendation.get('reasons', [])
-                            opp_data['warnings'] = recommendation.get('warnings', [])
-                except Exception as metadata_error:
-                    logger.debug(f"Error extracting metadata: {metadata_error}")
-                
-            else:
-                # Fallback for invalid objects
-                opp_data = {
-                    'token_symbol': 'UNKNOWN',
-                    'token_address': 'unknown',
-                    'chain': 'unknown',
-                    'detected_at': datetime.now().isoformat(),
-                    'risk_level': 'unknown',
-                    'recommendation': 'UNKNOWN',
-                    'confidence': 'UNKNOWN',
-                    'score': 0.0,
-                    'liquidity_usd': 0,
-                    'dex_name': 'Unknown',
-                    'pair_address': 'unknown',
-                    'reasons': [],
-                    'warnings': []
-                }
-            
-            # Add to opportunities list (keep last 100)
-            self.opportunities.append(opp_data)
-            if len(self.opportunities) > 100:
-                self.opportunities.pop(0)
-            
-            # Update stats safely
-            self.stats["total_opportunities"] += 1
-            if opp_data.get('confidence') == 'HIGH':
-                self.stats["high_confidence"] += 1
-            
-            # Broadcast to clients with error handling
-            try:
-                await self.broadcast_to_clients({
-                    "type": "new_opportunity",
-                    "data": opp_data
-                })
-            except Exception as broadcast_error:
-                logger.error(f"Error broadcasting opportunity: {broadcast_error}")
-            
-            logger.info(f"Added opportunity: {opp_data['token_symbol']} on {opp_data['chain']}")
-            
-        except Exception as e:
-            logger.error(f"Error adding opportunity: {e}")
-            # Don't re-raise to prevent system crashes
-
-    async def broadcast_to_clients(self, message: Dict):
-        """
-        Broadcast message to connected WebSocket clients with improved error handling.
-        
-        Args:
-            message (Dict): Message to broadcast to all connected clients
-            
-        Returns:
-            None
+            message: Message to broadcast
         """
         if not self.connected_clients:
             return
-        
-        disconnected = []
+            
+        disconnected_clients = []
         
         try:
             message_str = json.dumps(message)
         except Exception as json_error:
-            logger.error(f"Error serializing message: {json_error}")
+            self.logger.error(f"Error serializing message: {json_error}")
             return
         
-        # Create a copy of the list to avoid modification during iteration
-        clients_to_send = self.connected_clients.copy()
-        
-        for client in clients_to_send:
+        for client in self.connected_clients.copy():
             try:
-                # Check if client is still connected before sending
-                if client.client_state.value == 3:  # DISCONNECTED state
-                    disconnected.append(client)
+                # Check if client is still connected
+                if hasattr(client, 'client_state') and client.client_state.value == 3:
+                    disconnected_clients.append(client)
                     continue
                     
                 await client.send_text(message_str)
                 
-            except Exception as send_error:
-                error_msg = str(send_error).lower()
+            except Exception as e:
+                error_msg = str(e).lower()
                 if any(keyword in error_msg for keyword in ['disconnect', 'closed', 'connection']):
-                    logger.debug(f"Client disconnected during broadcast: {send_error}")
+                    self.logger.debug(f"Client disconnected during broadcast: {e}")
                 else:
-                    logger.warning(f"Error sending to client: {send_error}")
-                disconnected.append(client)
+                    self.logger.warning(f"Error sending to client: {e}")
+                disconnected_clients.append(client)
         
         # Remove disconnected clients
-        for client in disconnected:
+        for client in disconnected_clients:
             if client in self.connected_clients:
                 self.connected_clients.remove(client)
                 
-        if disconnected:
-            logger.info(f"Removed {len(disconnected)} disconnected clients. Active: {len(self.connected_clients)}")
+        if disconnected_clients:
+            self.logger.info(f"Removed {len(disconnected_clients)} disconnected clients")
 
-    async def cleanup_dead_connections(self):
+    async def add_opportunity(self, opportunity: TradingOpportunity) -> None:
         """
-        Proactively clean up dead WebSocket connections.
+        Add a new trading opportunity and broadcast to clients.
         
-        Returns:
-            None
+        Args:
+            opportunity: The trading opportunity to add
         """
+        try:
+            # Add to queue (keep last 100)
+            self.opportunities_queue.append(opportunity)
+            if len(self.opportunities_queue) > 100:
+                self.opportunities_queue.pop(0)
+                
+            # Update stats
+            self.stats["total_opportunities"] += 1
+            
+            recommendation = opportunity.metadata.get("recommendation", {})
+            if recommendation.get("confidence") == "HIGH":
+                self.stats["high_confidence"] += 1
+                
+            # Create safe opportunity data for broadcast
+            opp_data = {
+                "token_symbol": opportunity.token.symbol or "UNKNOWN",
+                "token_address": opportunity.token.address,
+                "chain": opportunity.metadata.get("chain", "ethereum"),
+                "risk_level": opportunity.contract_analysis.risk_level.value,
+                "recommendation": recommendation.get("action", "UNKNOWN"),
+                "confidence": recommendation.get("confidence", "UNKNOWN"),
+                "score": recommendation.get("score", 0.0),
+                "liquidity_usd": opportunity.liquidity.liquidity_usd,
+                "dex_name": opportunity.liquidity.dex_name,
+                "pair_address": opportunity.liquidity.pair_address,
+                "detected_at": opportunity.detected_at.isoformat(),
+                "reasons": recommendation.get("reasons", []),
+                "warnings": recommendation.get("warnings", [])
+            }
+                
+            # Broadcast to connected clients
+            await self.broadcast_message({
+                "type": "new_opportunity",
+                "data": opp_data
+            })
+            
+            self.logger.debug(f"Added opportunity: {opportunity.token.symbol}")
+            
+        except Exception as e:
+            self.logger.error(f"Error adding opportunity: {e}")
+
+    async def update_analysis_rate(self, rate: int) -> None:
+        """
+        Update the analysis rate statistic.
+        
+        Args:
+            rate: New analysis rate value
+        """
+        try:
+            self.stats["analysis_rate"] = rate
+            
+            # Broadcast updated stats
+            await self.broadcast_message({
+                "type": "stats_update",
+                "data": {
+                    "analysis_rate": rate,
+                    "total_opportunities": self.stats["total_opportunities"],
+                    "high_confidence": self.stats["high_confidence"]
+                }
+            })
+        except Exception as e:
+            self.logger.error(f"Error updating analysis rate: {e}")
+    
+    async def _periodic_cleanup_task(self) -> None:
+        """Periodic task to clean up dead WebSocket connections."""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Clean up every 30 seconds
+                await self._cleanup_dead_connections()
+            except Exception as e:
+                self.logger.error(f"Error in periodic cleanup: {e}")
+                await asyncio.sleep(60)
+    
+    async def _cleanup_dead_connections(self) -> None:
+        """Clean up dead WebSocket connections."""
         try:
             if not self.connected_clients:
                 return
@@ -245,132 +240,33 @@ class SimpleDashboardServer:
             
             for client in self.connected_clients.copy():
                 try:
-                    # Check client state
-                    if hasattr(client, 'client_state') and client.client_state.value == 3:  # DISCONNECTED
+                    if (hasattr(client, 'client_state') and 
+                        client.client_state.value == 3):  # DISCONNECTED
                         dead_clients.append(client)
-                    elif hasattr(client, 'application_state') and client.application_state.value in [2, 3]:  # DISCONNECTING or DISCONNECTED
-                        dead_clients.append(client)
-                except Exception as check_error:
-                    logger.debug(f"Error checking client state: {check_error}")
-                    # If we can't check the state, assume it's dead
+                except Exception:
                     dead_clients.append(client)
             
-            # Remove dead clients
             for client in dead_clients:
                 if client in self.connected_clients:
                     self.connected_clients.remove(client)
             
             if dead_clients:
-                logger.info(f"Cleaned up {len(dead_clients)} dead connections. Active: {len(self.connected_clients)}")
+                self.logger.info(f"Cleaned up {len(dead_clients)} dead connections")
                 
         except Exception as e:
-            logger.error(f"Error during connection cleanup: {e}")
-
-    async def update_analysis_rate(self, rate: int):
-        """
-        Update analysis rate and broadcast to clients with connection cleanup.
-        
-        Args:
-            rate (int): New analysis rate value
-            
-        Returns:
-            None
-        """
-        try:
-            self.stats["analysis_rate"] = rate
-            
-            # Clean up dead connections before broadcasting
-            await self.cleanup_dead_connections()
-            
-            await self.broadcast_to_clients({
-                "type": "stats_update",
-                "data": {"analysis_rate": rate}
-            })
-        except Exception as e:
-            logger.error(f"Error updating analysis rate: {e}")
-
-    def get_safe_portfolio_summary(self) -> Dict[str, Any]:
-        """
-        Get portfolio summary with comprehensive error handling.
-        
-        Returns:
-            Dict[str, Any]: Portfolio summary or error information
-        """
-        try:
-            if self.position_manager and hasattr(self.position_manager, 'get_portfolio_summary'):
-                try:
-                    return self.position_manager.get_portfolio_summary()
-                except Exception as portfolio_error:
-                    logger.error(f"Error getting portfolio from position manager: {portfolio_error}")
-                    return {
-                        'total_positions': 0,
-                        'total_trades': 0,
-                        'success_rate': 0.0,
-                        'total_pnl': 0.0,
-                        'status': f'Position manager error: {str(portfolio_error)}'
-                    }
-            else:
-                return {
-                    'total_positions': 0,
-                    'total_trades': 0,
-                    'success_rate': 0.0,
-                    'total_pnl': 0.0,
-                    'status': 'No position manager connected'
-                }
-        except Exception as e:
-            logger.error(f"Error getting portfolio summary: {e}")
-            return {'error': str(e), 'status': 'Portfolio summary failed'}
+            self.logger.error(f"Error during connection cleanup: {e}")
 
 # Global dashboard instance
-dashboard_server = SimpleDashboardServer()
+dashboard_server = DashboardServer()
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Startup event handler with periodic connection cleanup.
-    
-    Returns:
-        None
-        
-    Raises:
-        Exception: If startup fails
-    """
-    try:
-        await dashboard_server.initialize()
-        
-        # Start periodic cleanup task
-        asyncio.create_task(periodic_cleanup_task())
-        
-        logger.info("Dashboard startup complete with periodic cleanup enabled")
-    except Exception as e:
-        logger.error(f"Dashboard startup error: {e}")
-
-async def periodic_cleanup_task():
-    """
-    Periodic task to clean up dead WebSocket connections.
-    
-    Returns:
-        None
-    """
-    while True:
-        try:
-            await asyncio.sleep(30)  # Clean up every 30 seconds
-            await dashboard_server.cleanup_dead_connections()
-        except Exception as e:
-            logger.error(f"Error in periodic cleanup task: {e}")
-            await asyncio.sleep(60)  # Wait longer on error
+    """Initialize services on startup."""
+    await dashboard_server.initialize()
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    """
-    Serve the main dashboard page with error handling.
-    
-    Returns:
-        HTMLResponse: Dashboard HTML content
-        
-    Raises:
-        HTTPException: If dashboard cannot be served
-    """
+    """Serve the main dashboard page."""
     try:
         # Check if custom template exists
         template_path = "web/templates/dashboard.html"
@@ -380,26 +276,20 @@ async def get_dashboard():
                     content = f.read()
                     return HTMLResponse(content=content)
             except Exception as file_error:
-                logger.error(f"Error reading custom template: {file_error}")
-                # Fall back to basic dashboard
+                dashboard_server.logger.error(f"Error reading template: {file_error}")
         
-        # Return basic dashboard
-        return HTMLResponse(content=get_basic_dashboard_html())
+        # Return enhanced basic dashboard with watchlist
+        return HTMLResponse(content=get_enhanced_dashboard_html())
         
     except Exception as e:
-        logger.error(f"Dashboard page error: {e}")
+        dashboard_server.logger.error(f"Dashboard page error: {e}")
         return HTMLResponse(
-            content=f"<h1>Dashboard Error</h1><p>Error: {e}</p><p>Check server logs for details.</p>", 
+            content=f"<h1>Dashboard Error</h1><p>Error: {e}</p>", 
             status_code=500
         )
 
-def get_basic_dashboard_html() -> str:
-    """
-    Get basic dashboard HTML with detailed modal functionality and comprehensive error handling.
-    
-    Returns:
-        str: Complete HTML dashboard content
-    """
+def get_enhanced_dashboard_html() -> str:
+    """Get enhanced dashboard HTML with watchlist functionality."""
     return """
     <!DOCTYPE html>
     <html lang="en">
@@ -416,7 +306,7 @@ def get_basic_dashboard_html() -> str:
                 min-height: 100vh;
                 padding: 20px;
             }
-            .container { max-width: 1200px; margin: 0 auto; }
+            .container { max-width: 1400px; margin: 0 auto; }
             .header {
                 text-align: center;
                 margin-bottom: 30px;
@@ -425,162 +315,67 @@ def get_basic_dashboard_html() -> str:
                 border-radius: 10px;
                 backdrop-filter: blur(10px);
             }
+            .main-grid {
+                display: grid;
+                grid-template-columns: 2fr 1fr;
+                gap: 20px;
+                margin-bottom: 20px;
+            }
+            .left-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
+            .right-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
             .stats {
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 20px;
-                margin-bottom: 30px;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 15px;
             }
             .stat-card {
                 background: rgba(255,255,255,0.1);
-                padding: 20px;
+                padding: 15px;
                 border-radius: 10px;
                 text-align: center;
                 backdrop-filter: blur(10px);
             }
-            .stat-value { font-size: 2em; font-weight: bold; color: #4CAF50; }
-            .stat-label { margin-top: 5px; opacity: 0.8; }
-            .opportunities {
-                background: rgba(255,255,255,0.1);
-                border-radius: 10px;
-                padding: 20px;
-                backdrop-filter: blur(10px);
-                margin-bottom: 20px;
-            }
+            .stat-value { font-size: 1.8em; font-weight: bold; color: #4CAF50; }
+            .stat-label { margin-top: 5px; opacity: 0.8; font-size: 0.9em; }
             
-            .watchlist-panel {
+            .opportunities, .watchlist-panel {
                 background: rgba(255,255,255,0.1);
                 border-radius: 10px;
                 padding: 20px;
                 backdrop-filter: blur(10px);
             }
             
-            .watchlist-controls {
+            .section-header {
                 display: flex;
-                gap: 10px;
+                justify-content: space-between;
+                align-items: center;
                 margin-bottom: 15px;
-                justify-content: flex-end;
+                padding-bottom: 10px;
+                border-bottom: 1px solid rgba(255,255,255,0.2);
             }
             
-            .watchlist-item {
-                background: rgba(255,255,255,0.1);
-                margin: 8px 0;
-                padding: 12px;
-                border-radius: 8px;
-                border-left: 4px solid #2196F3;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                transition: all 0.3s ease;
-            }
-            
-            .watchlist-item:hover {
-                background: rgba(255,255,255,0.2);
-                transform: translateY(-1px);
-            }
-            
-            .watchlist-token {
-                display: flex;
-                flex-direction: column;
-                gap: 3px;
-            }
-            
-            .watchlist-symbol {
-                font-size: 1.1em;
-                font-weight: bold;
-                color: #2196F3;
-            }
-            
-            .watchlist-details {
-                font-size: 0.8em;
-                opacity: 0.8;
-            }
-            
-            .watchlist-actions {
-                display: flex;
-                gap: 5px;
-            }
-            
-            .watchlist-price {
-                color: #4CAF50;
-                font-weight: bold;
-                margin-right: 10px;
-            }
-            .opportunity-item {
-                background: rgba(255,255,255,0.1);
-                margin: 10px 0;
-                padding: 15px;
-                border-radius: 8px;
-                border-left: 4px solid #4CAF50;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            .opportunity-item:hover {
-                background: rgba(255,255,255,0.2);
-                transform: translateY(-2px);
-            }
-            .opportunity-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 8px;
-            }
-            .token-symbol {
+            .section-title {
                 font-size: 1.2em;
                 font-weight: bold;
-                color: #4CAF50;
             }
-            .risk-badge {
-                padding: 4px 8px;
-                border-radius: 12px;
-                font-size: 12px;
-                font-weight: bold;
-                text-transform: uppercase;
-            }
-            .risk-low { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
-            .risk-medium { background: rgba(255, 193, 7, 0.3); color: #FFC107; }
-            .risk-high { background: rgba(244, 67, 54, 0.3); color: #F44336; }
-            .risk-critical { background: rgba(139, 0, 0, 0.3); color: #8B0000; }
-            .risk-unknown { background: rgba(158, 158, 158, 0.3); color: #9E9E9E; }
             
-            .opportunity-details {
-                font-size: 0.9em;
-                opacity: 0.9;
-                line-height: 1.4;
-            }
-            .chain-badge {
-                display: inline-block;
-                padding: 2px 6px;
-                border-radius: 4px;
-                font-size: 10px;
-                margin-right: 8px;
-                background: rgba(33, 150, 243, 0.3);
-                color: #2196F3;
-            }
-            .recommendation {
-                display: inline-block;
-                padding: 2px 6px;
-                border-radius: 4px;
-                font-size: 10px;
-                margin-left: 8px;
-                font-weight: bold;
-            }
-            .rec-strong_buy, .rec-strong-buy { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
-            .rec-buy { background: rgba(33, 150, 243, 0.3); color: #2196F3; }
-            .rec-small_buy, .rec-small-buy { background: rgba(33, 150, 243, 0.2); color: #2196F3; }
-            .rec-watch { background: rgba(255, 193, 7, 0.3); color: #FFC107; }
-            .rec-avoid { background: rgba(244, 67, 54, 0.3); color: #F44336; }
-            .rec-unknown { background: rgba(158, 158, 158, 0.3); color: #9E9E9E; }
-            
-            .opportunity-actions {
-                margin-top: 10px;
+            .controls {
                 display: flex;
                 gap: 8px;
             }
+            
             .action-btn {
-                padding: 4px 12px;
+                padding: 6px 12px;
                 border: none;
-                border-radius: 4px;
+                border-radius: 6px;
                 background: rgba(33, 150, 243, 0.8);
                 color: white;
                 cursor: pointer;
@@ -591,20 +386,101 @@ def get_basic_dashboard_html() -> str:
                 background: rgba(33, 150, 243, 1);
                 transform: translateY(-1px);
             }
-            .action-btn.details {
-                background: rgba(156, 39, 176, 0.8);
+            .action-btn.success { background: rgba(76, 175, 80, 0.8); }
+            .action-btn.success:hover { background: rgba(76, 175, 80, 1); }
+            .action-btn.danger { background: rgba(244, 67, 54, 0.8); }
+            .action-btn.danger:hover { background: rgba(244, 67, 54, 1); }
+            
+            .opportunity-item, .watchlist-item {
+                background: rgba(255,255,255,0.1);
+                margin: 8px 0;
+                padding: 12px;
+                border-radius: 8px;
+                border-left: 4px solid #4CAF50;
+                cursor: pointer;
+                transition: all 0.3s ease;
             }
-            .action-btn.details:hover {
-                background: rgba(156, 39, 176, 1);
+            .opportunity-item:hover, .watchlist-item:hover {
+                background: rgba(255,255,255,0.2);
+                transform: translateY(-1px);
             }
             
-            .status { color: #4CAF50; font-weight: bold; }
-            .error { color: #f44336; }
+            .watchlist-item {
+                border-left-color: #2196F3;
+            }
+            
+            .item-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+            }
+            
+            .token-symbol {
+                font-size: 1.1em;
+                font-weight: bold;
+                color: #4CAF50;
+            }
+            
+            .watchlist-item .token-symbol {
+                color: #2196F3;
+            }
+            
+            .risk-badge {
+                padding: 3px 6px;
+                border-radius: 12px;
+                font-size: 10px;
+                font-weight: bold;
+                text-transform: uppercase;
+            }
+            .risk-low { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
+            .risk-medium { background: rgba(255, 193, 7, 0.3); color: #FFC107; }
+            .risk-high { background: rgba(244, 67, 54, 0.3); color: #F44336; }
+            .risk-critical { background: rgba(139, 0, 0, 0.3); color: #8B0000; }
+            .risk-unknown { background: rgba(158, 158, 158, 0.3); color: #9E9E9E; }
+            
+            .item-details {
+                font-size: 0.85em;
+                opacity: 0.9;
+                line-height: 1.4;
+            }
+            
+            .chain-badge {
+                display: inline-block;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-size: 9px;
+                margin-right: 6px;
+                background: rgba(33, 150, 243, 0.3);
+                color: #2196F3;
+            }
+            
+            .recommendation {
+                display: inline-block;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-size: 9px;
+                margin-left: 6px;
+                font-weight: bold;
+            }
+            .rec-strong-buy { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
+            .rec-buy { background: rgba(33, 150, 243, 0.3); color: #2196F3; }
+            .rec-small-buy { background: rgba(33, 150, 243, 0.2); color: #2196F3; }
+            .rec-watch { background: rgba(255, 193, 7, 0.3); color: #FFC107; }
+            .rec-avoid { background: rgba(244, 67, 54, 0.3); color: #F44336; }
+            .rec-unknown { background: rgba(158, 158, 158, 0.3); color: #9E9E9E; }
+            
+            .item-actions {
+                margin-top: 8px;
+                display: flex;
+                gap: 6px;
+            }
+            
             .connection-status {
                 position: fixed;
                 top: 10px;
                 right: 10px;
-                padding: 10px;
+                padding: 8px 12px;
                 border-radius: 5px;
                 font-size: 12px;
                 z-index: 999;
@@ -627,14 +503,12 @@ def get_basic_dashboard_html() -> str:
                 align-items: center;
                 animation: fadeIn 0.3s ease;
             }
-            .modal-overlay.show {
-                display: flex;
-            }
+            .modal-overlay.show { display: flex; }
             .modal-content {
                 background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
                 border-radius: 16px;
                 border: 1px solid rgba(255, 255, 255, 0.2);
-                max-width: 800px;
+                max-width: 600px;
                 max-height: 90vh;
                 width: 90%;
                 overflow-y: auto;
@@ -650,17 +524,17 @@ def get_basic_dashboard_html() -> str:
             .modal-header h2 {
                 margin: 0;
                 color: #4CAF50;
-                font-size: 24px;
+                font-size: 20px;
             }
             .modal-close {
                 background: none;
                 border: none;
                 color: white;
-                font-size: 28px;
+                font-size: 24px;
                 cursor: pointer;
                 padding: 0;
-                width: 32px;
-                height: 32px;
+                width: 30px;
+                height: 30px;
                 border-radius: 50%;
                 display: flex;
                 align-items: center;
@@ -673,100 +547,30 @@ def get_basic_dashboard_html() -> str:
             .modal-body {
                 padding: 20px;
             }
-            .detail-section {
-                margin-bottom: 20px;
-                padding: 15px;
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 8px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
+            .form-group {
+                margin-bottom: 15px;
             }
-            .detail-section h3 {
-                margin: 0 0 10px 0;
-                color: #4CAF50;
-                font-size: 16px;
-                border-bottom: 1px solid rgba(76, 175, 80, 0.3);
-                padding-bottom: 5px;
+            .form-group label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+                font-size: 14px;
             }
-            .detail-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 10px;
-            }
-            .detail-item {
-                display: flex;
-                flex-direction: column;
-                gap: 3px;
-            }
-            .detail-item label {
-                font-weight: 600;
-                color: rgba(255, 255, 255, 0.7);
-                font-size: 12px;
-                text-transform: uppercase;
-            }
-            .detail-item span {
+            .form-group input, .form-group textarea, .form-group select {
+                width: 100%;
+                padding: 8px 12px;
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.1);
                 color: white;
                 font-size: 14px;
-                word-break: break-all;
             }
-            .address-text {
-                font-family: 'Courier New', monospace;
-                font-size: 12px !important;
-                color: #2196F3 !important;
-                background: rgba(0, 0, 0, 0.3);
-                padding: 3px 6px;
-                border-radius: 3px;
+            .form-group input::placeholder, .form-group textarea::placeholder {
+                color: rgba(255, 255, 255, 0.5);
             }
-            .copy-btn {
-                background: rgba(33, 150, 243, 0.3);
-                border: 1px solid rgba(33, 150, 243, 0.5);
-                color: #2196F3;
-                padding: 2px 6px;
-                border-radius: 3px;
-                font-size: 10px;
-                cursor: pointer;
-                margin-top: 3px;
-                align-self: flex-start;
-                transition: background 0.3s ease;
-            }
-            .copy-btn:hover {
-                background: rgba(33, 150, 243, 0.5);
-            }
-            .external-links {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-                margin-top: 10px;
-            }
-            .external-link {
-                display: inline-block;
-                padding: 6px 12px;
-                background: rgba(33, 150, 243, 0.3);
-                border: 1px solid rgba(33, 150, 243, 0.5);
-                color: #2196F3;
-                text-decoration: none;
-                border-radius: 4px;
-                font-size: 12px;
-                transition: all 0.3s ease;
-            }
-            .external-link:hover {
-                background: rgba(33, 150, 243, 0.5);
-                transform: translateY(-1px);
-            }
-            
-            /* Scrollbar styling */
-            .modal-content::-webkit-scrollbar {
-                width: 8px;
-            }
-            .modal-content::-webkit-scrollbar-track {
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 4px;
-            }
-            .modal-content::-webkit-scrollbar-thumb {
-                background: rgba(255, 255, 255, 0.3);
-                border-radius: 4px;
-            }
-            .modal-content::-webkit-scrollbar-thumb:hover {
-                background: rgba(255, 255, 255, 0.5);
+            .form-group textarea {
+                resize: vertical;
+                min-height: 60px;
             }
             
             @keyframes fadeIn {
@@ -778,19 +582,21 @@ def get_basic_dashboard_html() -> str:
                 to { transform: translateY(0); opacity: 1; }
             }
             
-            @media (max-width: 768px) {
-                .modal-content { width: 95%; margin: 20px; }
-                .detail-grid { grid-template-columns: 1fr; }
-                .opportunity-header { flex-direction: column; align-items: flex-start; gap: 5px; }
-                .stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+            @media (max-width: 1024px) {
+                .main-grid {
+                    grid-template-columns: 1fr;
+                }
+                .stats {
+                    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                }
             }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1>🚀 DEX Sniping Dashboard</h1>
-                <p>Real-time multi-chain token monitoring with intelligent analysis</p>
+                <h1>DEX Sniping Dashboard v2.0</h1>
+                <p>Real-time multi-chain token monitoring with intelligent analysis & watchlist</p>
             </div>
             
             <div class="stats">
@@ -810,24 +616,41 @@ def get_basic_dashboard_html() -> str:
                     <div class="stat-value" id="connected-clients">0</div>
                     <div class="stat-label">Connected Clients</div>
                 </div>
-            </div>
-            
-            <div class="opportunities">
-                <h2>🎯 Live Opportunities</h2>
-                <div id="opportunity-list">
-                    <p>Connecting to live feed...</p>
+                <div class="stat-card">
+                    <div class="stat-value" id="watchlist-count">0</div>
+                    <div class="stat-label">Watchlist Items</div>
                 </div>
             </div>
             
-            <!-- Watchlist Panel -->
-            <div class="watchlist-panel">
-                <h2>👁️ Watchlist</h2>
-                <div class="watchlist-controls">
-                    <button class="action-btn" onclick="clearWatchlist()">Clear All</button>
-                    <button class="action-btn" onclick="exportWatchlist()">Export</button>
+            <div class="main-grid">
+                <div class="left-panel">
+                    <div class="opportunities">
+                        <div class="section-header">
+                            <span class="section-title">Live Opportunities</span>
+                            <div class="controls">
+                                <button class="action-btn" onclick="clearOpportunities()">Clear</button>
+                            </div>
+                        </div>
+                        <div id="opportunity-list">
+                            <p>Connecting to live feed...</p>
+                        </div>
+                    </div>
                 </div>
-                <div id="watchlist-list">
-                    <p>No tokens in watchlist...</p>
+                
+                <div class="right-panel">
+                    <div class="watchlist-panel">
+                        <div class="section-header">
+                            <span class="section-title">Watchlist</span>
+                            <div class="controls">
+                                <button class="action-btn success" onclick="showAddToWatchlistModal()">Add</button>
+                                <button class="action-btn" onclick="refreshWatchlist()">Refresh</button>
+                                <button class="action-btn danger" onclick="clearWatchlist()">Clear</button>
+                            </div>
+                        </div>
+                        <div id="watchlist-list">
+                            <p>Loading watchlist...</p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -836,15 +659,58 @@ def get_basic_dashboard_html() -> str:
             Connecting...
         </div>
         
-        <!-- Details Modal -->
-        <div id="details-modal" class="modal-overlay">
+        <!-- Add to Watchlist Modal -->
+        <div id="add-watchlist-modal" class="modal-overlay">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2 id="modal-title">Token Details</h2>
-                    <button class="modal-close" onclick="closeDetailsModal()">&times;</button>
+                    <h2>Add to Watchlist</h2>
+                    <button class="modal-close" onclick="closeAddWatchlistModal()">&times;</button>
                 </div>
-                <div class="modal-body" id="modal-body">
-                    <!-- Content will be populated by JavaScript -->
+                <div class="modal-body">
+                    <form onsubmit="submitAddToWatchlist(event)">
+                        <div class="form-group">
+                            <label for="watchlist-token-address">Token Address *</label>
+                            <input type="text" id="watchlist-token-address" required 
+                                   placeholder="0x... or Solana address">
+                        </div>
+                        <div class="form-group">
+                            <label for="watchlist-token-symbol">Token Symbol *</label>
+                            <input type="text" id="watchlist-token-symbol" required 
+                                   placeholder="e.g., DOGE, PEPE">
+                        </div>
+                        <div class="form-group">
+                            <label for="watchlist-chain">Chain *</label>
+                            <select id="watchlist-chain" required>
+                                <option value="ETHEREUM">Ethereum</option>
+                                <option value="BASE">Base</option>
+                                <option value="SOLANA">Solana</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="watchlist-reason">Reason</label>
+                            <input type="text" id="watchlist-reason" 
+                                   placeholder="Why are you watching this token?">
+                        </div>
+                        <div class="form-group">
+                            <label for="watchlist-target-price">Target Price (USD)</label>
+                            <input type="number" id="watchlist-target-price" step="0.000001" 
+                                   placeholder="0.001">
+                        </div>
+                        <div class="form-group">
+                            <label for="watchlist-stop-loss">Stop Loss (USD)</label>
+                            <input type="number" id="watchlist-stop-loss" step="0.000001" 
+                                   placeholder="0.0005">
+                        </div>
+                        <div class="form-group">
+                            <label for="watchlist-notes">Notes</label>
+                            <textarea id="watchlist-notes" 
+                                      placeholder="Additional notes or analysis..."></textarea>
+                        </div>
+                        <div class="controls">
+                            <button type="submit" class="action-btn success">Add to Watchlist</button>
+                            <button type="button" class="action-btn" onclick="closeAddWatchlistModal()">Cancel</button>
+                        </div>
+                    </form>
                 </div>
             </div>
         </div>
@@ -853,32 +719,10 @@ def get_basic_dashboard_html() -> str:
             let ws = null;
             let reconnectAttempts = 0;
             const maxReconnectAttempts = 5;
-            let opportunities = []; // Store opportunities for details view
-            let watchlist = []; // Store watchlist tokens
+            let opportunities = [];
+            let watchlist = [];
             
-            // Load watchlist from localStorage on startup
-            function loadWatchlist() {
-                try {
-                    const saved = localStorage.getItem('dex_watchlist');
-                    if (saved) {
-                        watchlist = JSON.parse(saved);
-                        renderWatchlist();
-                    }
-                } catch (error) {
-                    console.error('Error loading watchlist:', error);
-                    watchlist = [];
-                }
-            }
-            
-            // Save watchlist to localStorage
-            function saveWatchlist() {
-                try {
-                    localStorage.setItem('dex_watchlist', JSON.stringify(watchlist));
-                } catch (error) {
-                    console.error('Error saving watchlist:', error);
-                }
-            }
-            
+            // WebSocket connection
             function connectWebSocket() {
                 try {
                     ws = new WebSocket('ws://localhost:8000/ws');
@@ -928,6 +772,9 @@ def get_basic_dashboard_html() -> str:
                         case 'stats_update':
                             updateStats(data.data);
                             break;
+                        case 'watchlist_updated':
+                            refreshWatchlist();
+                            break;
                         default:
                             console.log('Unknown message type:', data.type);
                     }
@@ -940,16 +787,14 @@ def get_basic_dashboard_html() -> str:
                 try {
                     const list = document.getElementById('opportunity-list');
                     
-                    // Add to opportunities array for details view
                     opportunities.unshift(opportunity);
-                    if (opportunities.length > 50) {
+                    if (opportunities.length > 20) {
                         opportunities.pop();
                     }
                     
                     const item = document.createElement('div');
                     item.className = 'opportunity-item';
                     
-                    // Safe data extraction with fallbacks
                     const tokenSymbol = opportunity.token_symbol || 'UNKNOWN';
                     const chain = opportunity.chain || 'unknown';
                     const riskLevel = opportunity.risk_level || 'unknown';
@@ -957,245 +802,241 @@ def get_basic_dashboard_html() -> str:
                     const confidence = opportunity.confidence || 'UNKNOWN';
                     const score = opportunity.score || 0;
                     const liquidityUsd = opportunity.liquidity_usd || 0;
-                    const detectedAt = opportunity.detected_at ? new Date(opportunity.detected_at) : new Date();
+                    const detectedAt = new Date(opportunity.detected_at);
                     
                     item.innerHTML = `
-                        <div class="opportunity-header">
+                        <div class="item-header">
                             <span class="token-symbol">${tokenSymbol}</span>
                             <span class="risk-badge risk-${riskLevel}">${riskLevel.toUpperCase()}</span>
                         </div>
-                        <div class="opportunity-details">
+                        <div class="item-details">
                             <span class="chain-badge">${chain.toUpperCase()}</span>
-                            Recommendation: <span class="recommendation rec-${recommendation.toLowerCase().replace('_', '-')}">${recommendation}</span><br>
-                            Confidence: ${confidence} | Score: ${score.toFixed(2)}<br>
-                            Liquidity: $${liquidityUsd.toLocaleString()}<br>
-                            <small>Detected: ${detectedAt.toLocaleTimeString()}</small>
+                            Rec: <span class="recommendation rec-${recommendation.toLowerCase().replace('_', '-')}">${recommendation}</span><br>
+                            Score: ${score.toFixed(2)} | Liq: $${liquidityUsd.toLocaleString()}<br>
+                            <small>${detectedAt.toLocaleTimeString()}</small>
                         </div>
-                        <div class="opportunity-actions">
+                        <div class="item-actions">
+                            <button class="action-btn success" onclick="addOpportunityToWatchlist('${opportunity.token_address}', '${tokenSymbol}', '${chain}')">Watch</button>
                             <button class="action-btn" onclick="executeTrade('${tokenSymbol}')">Trade</button>
-                            <button class="action-btn details" onclick="showTokenDetails('${opportunity.token_address}')">Details</button>
                         </div>
                     `;
                     
                     list.insertBefore(item, list.firstChild);
                     
-                    // Keep only last 10 opportunities visible
                     while (list.children.length > 10) {
                         list.removeChild(list.lastChild);
                     }
                     
-                    // Update opportunity count
-                    const totalEl = document.getElementById('total-opportunities');
-                    totalEl.textContent = parseInt(totalEl.textContent) + 1;
-                    
-                    if (confidence === 'HIGH') {
-                        const highConfEl = document.getElementById('high-confidence');
-                        highConfEl.textContent = parseInt(highConfEl.textContent) + 1;
-                    }
-                    
                 } catch (error) {
-                    console.error('Error adding opportunity to list:', error);
+                    console.error('Error adding opportunity:', error);
                 }
             }
             
-            function showTokenDetails(tokenAddress, opportunityData = null) {
+            // Watchlist functions
+            async function refreshWatchlist() {
                 try {
-                    let opportunity;
+                    const response = await fetch('/api/watchlist');
+                    const data = await response.json();
+                    watchlist = data.items || [];
+                    renderWatchlist();
+                    updateWatchlistCount();
+                } catch (error) {
+                    console.error('Error refreshing watchlist:', error);
+                    showNotification('Error refreshing watchlist', 'error');
+                }
+            }
+            
+            function renderWatchlist() {
+                try {
+                    const list = document.getElementById('watchlist-list');
                     
-                    if (opportunityData) {
-                        // Use provided data (e.g., from watchlist)
-                        opportunity = opportunityData;
+                    if (watchlist.length === 0) {
+                        list.innerHTML = '<p>No tokens in watchlist...</p>';
+                        return;
+                    }
+                    
+                    list.innerHTML = '';
+                    
+                    watchlist.forEach(item => {
+                        const div = document.createElement('div');
+                        div.className = 'watchlist-item';
+                        
+                        const addedAt = new Date(item.added_at);
+                        const targetPrice = item.target_price ? `$${item.target_price}` : 'N/A';
+                        
+                        div.innerHTML = `
+                            <div class="item-header">
+                                <span class="token-symbol">${item.token_symbol}</span>
+                                <span class="chain-badge">${item.chain}</span>
+                            </div>
+                            <div class="item-details">
+                                Target: ${targetPrice} | Status: ${item.status}<br>
+                                <small>Added: ${addedAt.toLocaleDateString()}</small><br>
+                                <small>${item.reason}</small>
+                            </div>
+                            <div class="item-actions">
+                                <button class="action-btn danger" onclick="removeFromWatchlist('${item.token_address}', '${item.chain}')">Remove</button>
+                            </div>
+                        `;
+                        
+                        list.appendChild(div);
+                    });
+                } catch (error) {
+                    console.error('Error rendering watchlist:', error);
+                }
+            }
+            
+            function showAddToWatchlistModal() {
+                document.getElementById('add-watchlist-modal').classList.add('show');
+            }
+            
+            function closeAddWatchlistModal() {
+                document.getElementById('add-watchlist-modal').classList.remove('show');
+                // Clear form
+                document.getElementById('watchlist-token-address').value = '';
+                document.getElementById('watchlist-token-symbol').value = '';
+                document.getElementById('watchlist-reason').value = '';
+                document.getElementById('watchlist-target-price').value = '';
+                document.getElementById('watchlist-stop-loss').value = '';
+                document.getElementById('watchlist-notes').value = '';
+            }
+            
+            async function submitAddToWatchlist(event) {
+                event.preventDefault();
+                
+                try {
+                    const formData = {
+                        token_address: document.getElementById('watchlist-token-address').value,
+                        token_symbol: document.getElementById('watchlist-token-symbol').value,
+                        chain: document.getElementById('watchlist-chain').value,
+                        reason: document.getElementById('watchlist-reason').value || 'Manual addition',
+                        target_price: document.getElementById('watchlist-target-price').value ? 
+                                     parseFloat(document.getElementById('watchlist-target-price').value) : null,
+                        stop_loss: document.getElementById('watchlist-stop-loss').value ? 
+                                  parseFloat(document.getElementById('watchlist-stop-loss').value) : null,
+                        notes: document.getElementById('watchlist-notes').value
+                    };
+                    
+                    const response = await fetch('/api/watchlist/add', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(formData)
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        showNotification('Added to watchlist successfully', 'success');
+                        closeAddWatchlistModal();
+                        refreshWatchlist();
                     } else {
-                        // Find in current opportunities
-                        opportunity = opportunities.find(opp => opp.token_address === tokenAddress);
-                        if (!opportunity) {
-                            showNotification('Opportunity details not found', 'error');
-                            return;
+                        showNotification(result.message || 'Failed to add to watchlist', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error adding to watchlist:', error);
+                    showNotification('Error adding to watchlist', 'error');
+                }
+            }
+            
+            async function addOpportunityToWatchlist(tokenAddress, tokenSymbol, chain) {
+                try {
+                    const formData = {
+                        token_address: tokenAddress,
+                        token_symbol: tokenSymbol,
+                        chain: chain,
+                        reason: 'Added from opportunity'
+                    };
+                    
+                    const response = await fetch('/api/watchlist/add', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(formData)
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        showNotification(`${tokenSymbol} added to watchlist`, 'success');
+                        refreshWatchlist();
+                    } else {
+                        showNotification(result.message || 'Failed to add to watchlist', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error adding to watchlist:', error);
+                    showNotification('Error adding to watchlist', 'error');
+                }
+            }
+            
+            async function removeFromWatchlist(tokenAddress, chain) {
+                try {
+                    const response = await fetch(`/api/watchlist/remove?token_address=${encodeURIComponent(tokenAddress)}&chain=${encodeURIComponent(chain)}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        showNotification('Removed from watchlist', 'success');
+                        refreshWatchlist();
+                    } else {
+                        showNotification(result.message || 'Failed to remove from watchlist', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error removing from watchlist:', error);
+                    showNotification('Error removing from watchlist', 'error');
+                }
+            }
+            
+            async function clearWatchlist() {
+                if (confirm('Are you sure you want to clear the entire watchlist?')) {
+                    try {
+                        for (const item of watchlist) {
+                            await removeFromWatchlist(item.token_address, item.chain);
                         }
+                        showNotification('Watchlist cleared', 'success');
+                    } catch (error) {
+                        console.error('Error clearing watchlist:', error);
+                        showNotification('Error clearing watchlist', 'error');
                     }
-                    
-                    // Update modal title
-                    document.getElementById('modal-title').textContent = `${opportunity.token_symbol} - Detailed Analysis`;
-                    
-                    // Build modal content with safe data access
-                    const modalBody = document.getElementById('modal-body');
-                    const reasons = opportunity.reasons || [];
-                    const warnings = opportunity.warnings || [];
-                    
-                    modalBody.innerHTML = `
-                        <div class="detail-section">
-                            <h3>Token Information</h3>
-                            <div class="detail-grid">
-                                <div class="detail-item">
-                                    <label>Symbol:</label>
-                                    <span>${opportunity.token_symbol || 'UNKNOWN'}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Address:</label>
-                                    <span class="address-text">${opportunity.token_address || 'unknown'}</span>
-                                    <button class="copy-btn" onclick="copyToClipboard('${opportunity.token_address}')">Copy</button>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Chain:</label>
-                                    <span class="chain-badge">${opportunity.chain || 'unknown'}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Detected:</label>
-                                    <span>${new Date(opportunity.detected_at).toLocaleString()}</span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="detail-section">
-                            <h3>Risk Analysis</h3>
-                            <div class="detail-grid">
-                                <div class="detail-item">
-                                    <label>Risk Level:</label>
-                                    <span class="risk-badge risk-${opportunity.risk_level}">${(opportunity.risk_level || 'unknown').toUpperCase()}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Confidence Score:</label>
-                                    <span>${(opportunity.score || 0).toFixed(3)}/1.0</span>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Recommendation:</label>
-                                    <span class="recommendation rec-${(opportunity.recommendation || 'unknown').toLowerCase().replace('_', '-')}">${opportunity.recommendation || 'UNKNOWN'}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Confidence:</label>
-                                    <span>${opportunity.confidence || 'UNKNOWN'}</span>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="detail-section">
-                            <h3>Liquidity Information</h3>
-                            <div class="detail-grid">
-                                <div class="detail-item">
-                                    <label>DEX:</label>
-                                    <span>${opportunity.dex_name || 'Unknown'}</span>
-                                </div>
-                                <div class="detail-item">
-                                    <label>Liquidity USD:</label>
-                                    <span>$${(opportunity.liquidity_usd || 0).toLocaleString()}</span>
-                                </div>
-                                ${opportunity.pair_address && opportunity.pair_address !== 'unknown' ? `
-                                <div class="detail-item">
-                                    <label>Pair Address:</label>
-                                    <span class="address-text">${opportunity.pair_address}</span>
-                                    <button class="copy-btn" onclick="copyToClipboard('${opportunity.pair_address}')">Copy</button>
-                                </div>
-                                ` : ''}
-                            </div>
-                        </div>
-                        
-                        ${reasons.length > 0 ? `
-                        <div class="detail-section">
-                            <h3>Analysis Reasons</h3>
-                            <ul style="margin-left: 20px; line-height: 1.6; color: #4CAF50;">
-                                ${reasons.map(reason => `<li>${reason}</li>`).join('')}
-                            </ul>
-                        </div>
-                        ` : ''}
-                        
-                        ${warnings.length > 0 ? `
-                        <div class="detail-section">
-                            <h3>Risk Warnings</h3>
-                            <ul style="margin-left: 20px; line-height: 1.6; color: #f44336;">
-                                ${warnings.map(warning => `<li>${warning}</li>`).join('')}
-                            </ul>
-                        </div>
-                        ` : ''}
-                        
-                        <div class="detail-section">
-                            <h3>External Links</h3>
-                            <div class="external-links">
-                                ${getExternalLinks(opportunity)}
-                            </div>
-                        </div>
-                    `;
-                    
-                    // Show modal
-                    document.getElementById('details-modal').classList.add('show');
-                    
-                } catch (error) {
-                    console.error('Error showing token details:', error);
-                    showNotification('Error loading token details', 'error');
                 }
             }
             
-            function getExternalLinks(opportunity) {
+            function updateWatchlistCount() {
+                document.getElementById('watchlist-count').textContent = watchlist.length;
+            }
+            
+            // Utility functions
+            function clearOpportunities() {
+                document.getElementById('opportunity-list').innerHTML = '<p>Opportunities cleared...</p>';
+                opportunities = [];
+            }
+            
+            function executeTrade(tokenSymbol) {
+                showNotification(`Trade execution for ${tokenSymbol} - Feature coming soon!`, 'info');
+            }
+            
+            function updateStats(stats) {
                 try {
-                    const links = [];
-                    const address = opportunity.token_address || '';
-                    const chain = (opportunity.chain || '').toLowerCase();
-                    
-                    if (chain.includes('ethereum')) {
-                        links.push(`<a href="https://etherscan.io/token/${address}" target="_blank" class="external-link">Etherscan</a>`);
-                        links.push(`<a href="https://dexscreener.com/ethereum/${address}" target="_blank" class="external-link">DexScreener</a>`);
-                    } else if (chain.includes('base')) {
-                        links.push(`<a href="https://basescan.org/token/${address}" target="_blank" class="external-link">BaseScan</a>`);
-                        links.push(`<a href="https://dexscreener.com/base/${address}" target="_blank" class="external-link">DexScreener</a>`);
-                    } else if (chain.includes('solana')) {
-                        links.push(`<a href="https://solscan.io/token/${address}" target="_blank" class="external-link">Solscan</a>`);
-                        links.push(`<a href="https://dexscreener.com/solana/${address}" target="_blank" class="external-link">DexScreener</a>`);
+                    if (stats.analysis_rate !== undefined) {
+                        document.getElementById('analysis-rate').textContent = stats.analysis_rate;
                     }
-                    
-                    const symbol = opportunity.token_symbol || '';
-                    if (symbol) {
-                        links.push(`<a href="https://www.coingecko.com/en/search_redirect?id=${symbol}" target="_blank" class="external-link">CoinGecko</a>`);
-                    }
-                    
-                    return links.join('');
                 } catch (error) {
-                    console.error('Error generating external links:', error);
-                    return '<span>External links unavailable</span>';
+                    console.error('Error updating stats:', error);
                 }
             }
             
-            function closeDetailsModal() {
+            function updateConnectionStatus(connected) {
                 try {
-                    document.getElementById('details-modal').classList.remove('show');
-                } catch (error) {
-                    console.error('Error closing modal:', error);
-                }
-            }
-            
-            function copyToClipboard(text) {
-                try {
-                    if (navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(text).then(() => {
-                            showNotification('Copied to clipboard!', 'success');
-                        }).catch((error) => {
-                            console.error('Clipboard API failed:', error);
-                            fallbackCopyToClipboard(text);
-                        });
+                    const statusEl = document.getElementById('connection-status');
+                    if (connected) {
+                        statusEl.textContent = 'Connected';
+                        statusEl.className = 'connection-status connected';
                     } else {
-                        fallbackCopyToClipboard(text);
+                        statusEl.textContent = 'Disconnected';
+                        statusEl.className = 'connection-status disconnected';
                     }
                 } catch (error) {
-                    console.error('Copy to clipboard error:', error);
-                    showNotification('Copy failed', 'error');
-                }
-            }
-            
-            function fallbackCopyToClipboard(text) {
-                try {
-                    const textArea = document.createElement('textarea');
-                    textArea.value = text;
-                    document.body.appendChild(textArea);
-                    textArea.select();
-                    const success = document.execCommand('copy');
-                    document.body.removeChild(textArea);
-                    
-                    if (success) {
-                        showNotification('Copied to clipboard!', 'success');
-                    } else {
-                        showNotification('Copy failed', 'error');
-                    }
-                } catch (error) {
-                    console.error('Fallback copy failed:', error);
-                    showNotification('Copy not supported', 'error');
+                    console.error('Error updating connection status:', error);
                 }
             }
             
@@ -1206,7 +1047,7 @@ def get_basic_dashboard_html() -> str:
                     
                     notification.style.cssText = `
                         position: fixed;
-                        top: 20px;
+                        top: 70px;
                         right: 20px;
                         background: ${bgColor};
                         color: white;
@@ -1230,56 +1071,7 @@ def get_basic_dashboard_html() -> str:
                 }
             }
             
-            function executeTrade(tokenSymbol) {
-                try {
-                    showNotification(`Trade execution for ${tokenSymbol} - Feature coming soon!`, 'info');
-                } catch (error) {
-                    console.error('Error in executeTrade:', error);
-                }
-            }
-            
-            function updateStats(stats) {
-                try {
-                    if (stats.analysis_rate !== undefined) {
-                        const rateEl = document.getElementById('analysis-rate');
-                        if (rateEl) {
-                            rateEl.textContent = stats.analysis_rate;
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error updating stats:', error);
-                }
-            }
-            
-            function updateConnectionStatus(connected) {
-                try {
-                    const statusEl = document.getElementById('connection-status');
-                    if (statusEl) {
-                        if (connected) {
-                            statusEl.textContent = 'Connected';
-                            statusEl.className = 'connection-status connected';
-                        } else {
-                            statusEl.textContent = 'Disconnected';
-                            statusEl.className = 'connection-status disconnected';
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error updating connection status:', error);
-                }
-            }
-            
-            // Close modal when clicking outside
-            document.getElementById('details-modal').addEventListener('click', function(e) {
-                try {
-                    if (e.target === this) {
-                        closeDetailsModal();
-                    }
-                } catch (error) {
-                    console.error('Error in modal click handler:', error);
-                }
-            });
-            
-            // Fetch initial stats
+            // Fetch initial data
             async function fetchStats() {
                 try {
                     const response = await fetch('/api/stats');
@@ -1295,12 +1087,20 @@ def get_basic_dashboard_html() -> str:
                 }
             }
             
+            // Close modals when clicking outside
+            document.getElementById('add-watchlist-modal').addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeAddWatchlistModal();
+                }
+            });
+            
             // Initialize
             try {
-                loadWatchlist(); // Load saved watchlist
                 connectWebSocket();
                 fetchStats();
-                setInterval(fetchStats, 10000); // Update stats every 10 seconds
+                refreshWatchlist();
+                setInterval(fetchStats, 10000);
+                setInterval(refreshWatchlist, 30000); // Refresh watchlist every 30s
             } catch (error) {
                 console.error('Error during initialization:', error);
             }
@@ -1311,230 +1111,68 @@ def get_basic_dashboard_html() -> str:
 
 @app.get("/api/stats")
 async def get_stats():
-    """
-    Get system statistics with comprehensive error handling.
-    
-    Returns:
-        Dict: System statistics or error information
-        
-    Raises:
-        HTTPException: If stats cannot be retrieved
-    """
+    """Get current system statistics."""
     try:
         uptime = datetime.now() - dashboard_server.stats["uptime_start"]
-        portfolio = dashboard_server.get_safe_portfolio_summary()
+        portfolio = {}
+        
+        if dashboard_server.position_manager:
+            try:
+                portfolio = dashboard_server.position_manager.get_portfolio_summary()
+            except Exception as portfolio_error:
+                dashboard_server.logger.debug(f"Portfolio error: {portfolio_error}")
+                portfolio = {"status": "unavailable"}
         
         return {
             "total_opportunities": dashboard_server.stats["total_opportunities"],
-            "high_confidence": dashboard_server.stats["high_confidence"],
+            "high_confidence": dashboard_server.stats["high_confidence"], 
             "active_chains": dashboard_server.stats["active_chains"],
             "analysis_rate": dashboard_server.stats["analysis_rate"],
-            "uptime_hours": round(uptime.total_seconds() / 3600, 2),
-            "connected_clients": len(dashboard_server.connected_clients),
-            "portfolio": portfolio
+            "uptime_hours": uptime.total_seconds() / 3600,
+            "portfolio": portfolio,
+            "connected_clients": len(dashboard_server.connected_clients)
         }
+        
     except Exception as e:
-        logger.error(f"Stats error: {e}")
-        # Return partial data instead of failing completely
+        dashboard_server.logger.error(f"Error getting stats: {e}")
         return {
-            "error": str(e), 
-            "connected_clients": len(dashboard_server.connected_clients) if dashboard_server.connected_clients else 0,
-            "total_opportunities": dashboard_server.stats.get("total_opportunities", 0),
+            "error": str(e),
+            "connected_clients": len(dashboard_server.connected_clients),
             "status": "error"
         }
 
-@app.get("/api/opportunities")
+@app.get("/api/opportunities", response_model=List[OpportunityResponse])
 async def get_opportunities():
-    """
-    Get recent opportunities with error handling.
-    
-    Returns:
-        List[Dict]: Recent opportunities or empty list on error
-        
-    Raises:
-        HTTPException: If opportunities cannot be retrieved
-    """
+    """Get current trading opportunities."""
     try:
-        # Return last 20 opportunities safely
-        opportunities = dashboard_server.opportunities[-20:] if dashboard_server.opportunities else []
+        opportunities = []
+        
+        for opp in dashboard_server.opportunities_queue[-20:]:  # Last 20
+            try:
+                age_minutes = (datetime.now() - opp.detected_at).total_seconds() / 60
+                
+                opportunities.append(OpportunityResponse(
+                    token_symbol=opp.token.symbol or "UNKNOWN",
+                    token_address=opp.token.address,
+                    chain=opp.metadata.get("chain", "ethereum"),
+                    risk_level=opp.contract_analysis.risk_level.value,
+                    recommendation=opp.metadata.get("recommendation", {}).get("action", "UNKNOWN"),
+                    confidence=opp.metadata.get("recommendation", {}).get("confidence", "UNKNOWN"),
+                    score=opp.metadata.get("recommendation", {}).get("score", 0.0),
+                    liquidity_usd=opp.liquidity.liquidity_usd,
+                    age_minutes=int(age_minutes)
+                ))
+            except Exception as opp_error:
+                dashboard_server.logger.debug(f"Error processing opportunity: {opp_error}")
+                continue
+            
         return opportunities
+        
     except Exception as e:
-        logger.error(f"Opportunities error: {e}")
+        dashboard_server.logger.error(f"Error getting opportunities: {e}")
         return []
 
-@app.get("/api/trades")
-async def get_trade_history():
-    """
-    Get recent trade history with comprehensive error handling.
-    
-    Returns:
-        Dict: Trade history or error information
-        
-    Raises:
-        HTTPException: If trades cannot be retrieved
-    """
-    try:
-        trades = []
-        
-        # Try to get trades from position manager
-        if (dashboard_server.position_manager and 
-            hasattr(dashboard_server.position_manager, 'closed_positions')):
-            
-            try:
-                for exit in dashboard_server.position_manager.closed_positions[-20:]:  # Last 20
-                    try:
-                        trades.append({
-                            "id": getattr(exit, 'position_id', 'unknown'),
-                            "token_symbol": getattr(exit, 'position_id', 'UNKNOWN').split('_')[0],
-                            "trade_type": "close",
-                            "amount": float(getattr(exit, 'exit_amount', 0)),
-                            "status": "completed",
-                            "created_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
-                            "executed_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
-                            "tx_hash": getattr(exit, 'exit_tx_hash', None),
-                            "chain": "unknown",
-                            "pnl": float(getattr(exit, 'realized_pnl', 0))
-                        })
-                    except Exception as trade_error:
-                        logger.error(f"Error processing individual trade: {trade_error}")
-                        continue
-            except Exception as position_error:
-                logger.error(f"Error accessing position manager data: {position_error}")
-        
-        # Return trades with success status
-        return {"trades": trades, "status": "success"}
-        
-    except Exception as e:
-        logger.error(f"Error getting trade history: {e}")
-        return {"trades": [], "error": str(e), "status": "error"}
-
-@app.get("/api/positions")
-async def get_positions():
-    """
-    Get current trading positions with comprehensive error handling.
-    
-    Returns:
-        Dict: Current positions or error information
-        
-    Raises:
-        HTTPException: If positions cannot be retrieved
-    """
-    try:
-        positions = []
-        
-        if (dashboard_server.position_manager and 
-            hasattr(dashboard_server.position_manager, 'active_positions')):
-            
-            try:
-                for position_id, position in dashboard_server.position_manager.active_positions.items():
-                    try:
-                        positions.append({
-                            "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
-                            "amount": float(getattr(position, 'entry_amount', 0)),
-                            "entry_price": float(getattr(position, 'entry_price', 0)),
-                            "current_price": float(getattr(position, 'current_price', 0)),
-                            "pnl": float(getattr(position, 'unrealized_pnl', 0)),
-                            "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
-                        })
-                    except Exception as pos_error:
-                        logger.error(f"Error processing position {position_id}: {pos_error}")
-                        continue
-            except Exception as positions_error:
-                logger.error(f"Error accessing active positions: {positions_error}")
-        
-        return {"positions": positions, "status": "success"}
-        
-    except Exception as e:
-        logger.error(f"Error getting positions: {e}")
-        return {"positions": [], "error": str(e), "status": "error"}
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time updates with improved disconnect handling.
-    
-    Args:
-        websocket (WebSocket): WebSocket connection
-        
-    Returns:
-        None
-        
-    Raises:
-        WebSocketDisconnect: When client disconnects
-    """
-    await websocket.accept()
-    dashboard_server.connected_clients.append(websocket)
-    logger.info(f"WebSocket client connected. Total: {len(dashboard_server.connected_clients)}")
-    
-    try:
-        # Send initial connection confirmation
-        await websocket.send_text(json.dumps({
-            "type": "connected",
-            "message": "WebSocket connection established"
-        }))
-        
-        while True:
-            try:
-                # Use receive_json with timeout to handle disconnects gracefully
-                message = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
-                
-                # Handle different message types
-                if message.get("type") == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong"}))
-                elif message.get("type") == "subscribe":
-                    await websocket.send_text(json.dumps({
-                        "type": "subscribed",
-                        "message": "Successfully subscribed to updates"
-                    }))
-                else:
-                    logger.debug(f"Unknown WebSocket message type: {message.get('type')}")
-                    
-            except asyncio.TimeoutError:
-                # Send ping to keep connection alive
-                try:
-                    await websocket.send_text(json.dumps({"type": "ping"}))
-                except Exception:
-                    # If we can't send ping, connection is dead
-                    break
-                    
-            except json.JSONDecodeError as json_error:
-                logger.warning(f"Invalid JSON from WebSocket client: {json_error}")
-                try:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "Invalid JSON format"
-                    }))
-                except Exception:
-                    # If we can't send error message, connection is dead
-                    break
-                    
-            except Exception as message_error:
-                # Check if this is a disconnect-related error
-                error_msg = str(message_error).lower()
-                if any(keyword in error_msg for keyword in ['disconnect', 'closed', 'connection']):
-                    logger.debug(f"WebSocket connection closed: {message_error}")
-                    break
-                else:
-                    logger.error(f"WebSocket message processing error: {message_error}")
-                    # Continue the loop for non-disconnect errors
-                
-    except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected normally")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        # Always clean up the client connection
-        if websocket in dashboard_server.connected_clients:
-            dashboard_server.connected_clients.remove(websocket)
-        logger.info(f"WebSocket cleanup complete. Remaining clients: {len(dashboard_server.connected_clients)}")
-
-
-# Add these imports at the top after existing imports
-from models.watchlist import watchlist_manager, WatchlistStatus
-from models.token import TokenInfo, LiquidityInfo, TradingOpportunity, ContractAnalysis, SocialMetrics
-
-# Add these endpoints after the existing endpoints:
-
+# Watchlist API endpoints
 @app.get("/api/watchlist")
 async def get_watchlist(status: Optional[str] = None):
     """Get watchlist items, optionally filtered by status."""
@@ -1554,56 +1192,46 @@ async def get_watchlist(status: Optional[str] = None):
             "status_filter": status
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         dashboard_server.logger.error(f"Error getting watchlist: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Update the add_to_watchlist function in api/dashboard_server.py:
-
 @app.post("/api/watchlist/add")
-async def add_to_watchlist(request: dict):
+async def add_to_watchlist(request: WatchlistAddRequest):
     """Add a token to the watchlist."""
     try:
-        required_fields = ['token_address', 'chain']
-        for field in required_fields:
-            if field not in request:
-                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+        # Create opportunity object for watchlist
+        token_address = request.token_address
+        chain = request.chain.upper()
         
-        # Create minimal opportunity object for watchlist
         # Handle different address formats for different chains
-        token_address = request['token_address']
-        chain = request['chain'].upper()
-        
-        # Create a flexible TokenInfo that doesn't validate address format for Solana
         if 'SOLANA' in chain:
             # For Solana, create a custom token object that bypasses validation
             token_info = type('SolanaTokenInfo', (), {
                 'address': token_address,
-                'symbol': request.get('token_symbol', 'UNKNOWN'),
-                'name': request.get('token_name'),
+                'symbol': request.token_symbol,
+                'name': request.token_symbol,
                 'decimals': 6,
                 'total_supply': 1000000000
             })()
         else:
             # For EVM chains, use the regular TokenInfo with validation
-            from models.token import TokenInfo
             token_info = TokenInfo(
                 address=token_address,
-                symbol=request.get('token_symbol', 'UNKNOWN'),
-                name=request.get('token_name')
+                symbol=request.token_symbol,
+                name=request.token_symbol
             )
         
-        from models.token import LiquidityInfo, TradingOpportunity, ContractAnalysis, SocialMetrics
-        from datetime import datetime
-        
         liquidity_info = LiquidityInfo(
-            pair_address=request.get('pair_address', ''),
-            dex_name=request.get('dex_name', 'Unknown'),
+            pair_address='',
+            dex_name='Unknown',
             token0=token_address,
             token1='',
             reserve0=0.0,
             reserve1=0.0,
-            liquidity_usd=request.get('liquidity_usd', 0.0),
+            liquidity_usd=0.0,
             created_at=datetime.now(),
             block_number=0
         )
@@ -1616,63 +1244,33 @@ async def add_to_watchlist(request: dict):
         )
         
         opportunity.metadata['chain'] = chain
-        opportunity.metadata['recommendation'] = request.get('recommendation', {})
-        
-        # Import watchlist manager
-        try:
-            from models.watchlist import watchlist_manager
-        except ImportError:
-            return {"success": False, "message": "Watchlist system not available"}
         
         success = watchlist_manager.add_to_watchlist(
             opportunity=opportunity,
-            reason=request.get('reason', 'Manual addition'),
-            target_price=request.get('target_price'),
-            stop_loss=request.get('stop_loss'),
-            notes=request.get('notes', '')
+            reason=request.reason,
+            target_price=request.target_price,
+            stop_loss=request.stop_loss,
+            notes=request.notes
         )
         
         if success:
-            # Try to broadcast to connected clients, but don't fail if method doesn't exist
-            try:
-                if hasattr(dashboard_server, 'broadcast_message'):
-                    await dashboard_server.broadcast_message({
-                        "type": "watchlist_updated",
-                        "data": {
-                            "action": "added",
-                            "token_symbol": token_info.symbol if hasattr(token_info, 'symbol') else request.get('token_symbol', 'UNKNOWN'),
-                            "token_address": token_address
-                        }
-                    })
-                else:
-                    # If no broadcast method, just log it
-                    import logging
-                    logger = logging.getLogger("DashboardAPI")
-                    logger.info(f"Watchlist updated: {token_info.symbol if hasattr(token_info, 'symbol') else request.get('token_symbol', 'UNKNOWN')} added")
-            except Exception as broadcast_error:
-                # Don't fail the whole request if broadcast fails
-                import logging
-                logger = logging.getLogger("DashboardAPI")
-                logger.warning(f"Failed to broadcast watchlist update: {broadcast_error}")
+            # Broadcast to connected clients
+            await dashboard_server.broadcast_message({
+                "type": "watchlist_updated",
+                "data": {
+                    "action": "added",
+                    "token_symbol": request.token_symbol,
+                    "token_address": token_address
+                }
+            })
             
             return {"success": True, "message": "Added to watchlist"}
         else:
-            return {"success": False, "message": "Failed to add to watchlist"}
+            return {"success": False, "message": "Token already in watchlist"}
         
-    except HTTPException:
-        raise
     except Exception as e:
-        # Use a simple logger approach since dashboard_server.logger may not exist
-        import logging
-        logger = logging.getLogger("DashboardAPI")
-        logger.error(f"Error adding to watchlist: {e}")
+        dashboard_server.logger.error(f"Error adding to watchlist: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
-
-
-
-
-
 
 @app.delete("/api/watchlist/remove")
 async def remove_from_watchlist(token_address: str, chain: str):
@@ -1699,32 +1297,6 @@ async def remove_from_watchlist(token_address: str, chain: str):
         dashboard_server.logger.error(f"Error removing from watchlist: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put("/api/watchlist/update")
-async def update_watchlist_item(request: dict):
-    """Update a watchlist item."""
-    try:
-        required_fields = ['token_address', 'chain']
-        for field in required_fields:
-            if field not in request:
-                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-        
-        updates = {k: v for k, v in request.items() if k not in ['token_address', 'chain']}
-        
-        success = watchlist_manager.update_watchlist_item(
-            token_address=request['token_address'],
-            chain=request['chain'],
-            **updates
-        )
-        
-        if success:
-            return {"success": True, "message": "Watchlist item updated"}
-        else:
-            return {"success": False, "message": "Watchlist item not found"}
-        
-    except Exception as e:
-        dashboard_server.logger.error(f"Error updating watchlist item: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/api/watchlist/stats")
 async def get_watchlist_stats():
     """Get watchlist statistics."""
@@ -1736,10 +1308,277 @@ async def get_watchlist_stats():
         dashboard_server.logger.error(f"Error getting watchlist stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time updates."""
+    await websocket.accept()
+    dashboard_server.connected_clients.append(websocket)
+    dashboard_server.logger.info(f"WebSocket client connected. Total: {len(dashboard_server.connected_clients)}")
+    
+    try:
+        # Send initial connection confirmation
+        await websocket.send_text(json.dumps({
+            "type": "connected",
+            "message": "WebSocket connection established"
+        }))
+        
+        while True:
+            try:
+                # Use receive_json with timeout to handle disconnects gracefully
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+                
+                # Handle different message types
+                if message.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                elif message.get("type") == "subscribe":
+                    await websocket.send_text(json.dumps({
+                        "type": "subscribed",
+                        "message": "Successfully subscribed to updates"
+                    }))
+                    
+            except asyncio.TimeoutError:
+                        # Send ping to keep connection alive
+                        try:
+                            await websocket.send_text(json.dumps({"type": "ping"}))
+                        except Exception:
+                            # If we can't send ping, connection is dead
+                            break
+                            
+                    except json.JSONDecodeError as json_error:
+                        dashboard_server.logger.warning(f"Invalid JSON from WebSocket client: {json_error}")
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "error",
+                                "message": "Invalid JSON format"
+                            }))
+                        except Exception:
+                            # If we can't send error message, connection is dead
+                            break
+                            
+                    except Exception as message_error:
+                        # Check if this is a disconnect-related error
+                        error_msg = str(message_error).lower()
+                        if any(keyword in error_msg for keyword in ['disconnect', 'closed', 'connection']):
+                            dashboard_server.logger.debug(f"WebSocket connection closed: {message_error}")
+                            break
+                        else:
+                            dashboard_server.logger.error(f"WebSocket message processing error: {message_error}")
+                            # Continue the loop for non-disconnect errors
+                        
+            except WebSocketDisconnect:
+                dashboard_server.logger.info("WebSocket client disconnected normally")
+            except Exception as e:
+                dashboard_server.logger.error(f"WebSocket error: {e}")
+            finally:
+                # Always clean up the client connection
+                if websocket in dashboard_server.connected_clients:
+                    dashboard_server.connected_clients.remove(websocket)
+                dashboard_server.logger.info(f"WebSocket cleanup complete. Remaining clients: {len(dashboard_server.connected_clients)}")
+
+@app.get("/api/trades")
+async def get_trade_history():
+    """Get recent trade history."""
+    try:
+        trades = []
+        
+        # Try to get trades from position manager
+        if (dashboard_server.position_manager and 
+            hasattr(dashboard_server.position_manager, 'closed_positions')):
+            
+            try:
+                for exit in dashboard_server.position_manager.closed_positions[-20:]:  # Last 20
+                    try:
+                        trades.append({
+                            "id": getattr(exit, 'position_id', 'unknown'),
+                            "token_symbol": getattr(exit, 'position_id', 'UNKNOWN').split('_')[0],
+                            "trade_type": "close",
+                            "amount": float(getattr(exit, 'exit_amount', 0)),
+                            "status": "completed",
+                            "created_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                            "executed_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                            "tx_hash": getattr(exit, 'exit_tx_hash', None),
+                            "chain": "unknown",
+                            "pnl": float(getattr(exit, 'realized_pnl', 0))
+                        })
+                    except Exception as trade_error:
+                        dashboard_server.logger.error(f"Error processing individual trade: {trade_error}")
+                        continue
+            except Exception as position_error:
+                dashboard_server.logger.error(f"Error accessing position manager data: {position_error}")
+        
+        return {"trades": trades, "status": "success"}
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error getting trade history: {e}")
+        return {"trades": [], "error": str(e), "status": "error"}
+
+@app.get("/api/positions")
+async def get_positions():
+    """Get current trading positions."""
+    try:
+        positions = []
+        
+        if (dashboard_server.position_manager and 
+            hasattr(dashboard_server.position_manager, 'active_positions')):
+            
+            try:
+                for position_id, position in dashboard_server.position_manager.active_positions.items():
+                    try:
+                        positions.append({
+                            "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
+                            "amount": float(getattr(position, 'entry_amount', 0)),
+                            "entry_price": float(getattr(position, 'entry_price', 0)),
+                            "current_price": float(getattr(position, 'current_price', 0)),
+                            "pnl": float(getattr(position, 'unrealized_pnl', 0)),
+                            "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
+                        })
+                    except Exception as pos_error:
+                        dashboard_server.logger.error(f"Error processing position {position_id}: {pos_error}")
+                        continue
+            except Exception as positions_error:
+                dashboard_server.logger.error(f"Error accessing active positions: {positions_error}")
+        
+        return {"positions": positions, "status": "success"}
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error getting positions: {e}")
+        return {"positions": [], "error": str(e), "status": "error"}
+
+@app.post("/api/trade")
+async def execute_trade(trade_request: TradeRequest):
+    """Execute a manual trade."""
+    try:
+        dashboard_server.logger.info(f"Manual trade request: {trade_request.token_symbol}")
+        
+        if not dashboard_server.trading_executor:
+            return {"success": False, "message": "Trading executor not available"}
+        
+        # Execute the trade
+        result = await dashboard_server.trading_executor.manual_trade(
+            token_address=trade_request.token_address,
+            amount=trade_request.amount,
+            chain=trade_request.chain
+        )
+        
+        if result:
+            # Broadcast trade execution to connected clients
+            await dashboard_server.broadcast_message({
+                "type": "trade_executed",
+                "data": {
+                    "token_symbol": trade_request.token_symbol,
+                    "amount": trade_request.amount,
+                    "status": result.status.value if hasattr(result, 'status') else 'unknown',
+                    "tx_hash": getattr(result, 'tx_hash', None)
+                }
+            })
+            
+            return {
+                "success": True,
+                "trade_id": getattr(result, 'id', 'unknown'),
+                "message": f"Trade executed for {trade_request.token_symbol}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Trade execution failed"
+            }
+            
+    except Exception as e:
+        dashboard_server.logger.error(f"Error executing trade: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/system/status")
+async def get_system_status():
+    """Get detailed system status."""
+        try:
+            uptime = datetime.now() - dashboard_server.stats["uptime_start"]
+            
+            return {
+                "status": "running",
+                "uptime_seconds": uptime.total_seconds(),
+                "connected_clients": len(dashboard_server.connected_clients),
+                "trading_executor_initialized": dashboard_server.trading_executor is not None,
+                "position_manager_initialized": dashboard_server.position_manager is not None,
+                "opportunities_in_queue": len(dashboard_server.opportunities_queue),
+                "watchlist_items": len(watchlist_manager.get_watchlist()),
+                "chains": {
+                    "ethereum": {"status": "active"},
+                    "base": {"status": "active"},
+                    "solana": {"status": "active"}
+                }
+            }
+            
+        except Exception as e:
+            dashboard_server.logger.error(f"Error getting system status: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/export/data")
+async def export_data():
+    """Export trading data for analysis."""
+    try:
+        export_data = {
+            "timestamp": datetime.now().isoformat(),
+            "stats": dashboard_server.stats,
+            "opportunities": [
+                {
+                    "token_symbol": opp.token.symbol,
+                    "token_address": opp.token.address,
+                    "chain": opp.metadata.get("chain"),
+                    "risk_level": opp.contract_analysis.risk_level.value,
+                    "recommendation": opp.metadata.get("recommendation", {}),
+                    "detected_at": opp.detected_at.isoformat(),
+                    "liquidity_usd": opp.liquidity.liquidity_usd
+                }
+                for opp in dashboard_server.opportunities_queue
+            ],
+            "watchlist": [item.to_dict() for item in watchlist_manager.get_watchlist()],
+            "trade_history": [],  # Will be populated if trading system is available
+            "positions": []  # Will be populated if position manager is available
+        }
+        
+        # Add trading data if available
+        if dashboard_server.position_manager:
+            try:
+                if hasattr(dashboard_server.position_manager, 'closed_positions'):
+                    export_data["trade_history"] = [
+                        {
+                            "position_id": getattr(exit, 'position_id', 'unknown'),
+                            "exit_time": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                            "realized_pnl": float(getattr(exit, 'realized_pnl', 0))
+                        }
+                        for exit in dashboard_server.position_manager.closed_positions
+                    ]
+                
+                if hasattr(dashboard_server.position_manager, 'active_positions'):
+                    export_data["positions"] = [
+                        {
+                            "position_id": position_id,
+                            "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
+                            "entry_amount": float(getattr(position, 'entry_amount', 0)),
+                            "entry_price": float(getattr(position, 'entry_price', 0)),
+                            "unrealized_pnl": float(getattr(position, 'unrealized_pnl', 0))
+                        }
+                        for position_id, position in dashboard_server.position_manager.active_positions.items()
+                    ]
+            except Exception as trading_error:
+                dashboard_server.logger.debug(f"Error exporting trading data: {trading_error}")
+        
+        return export_data
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error exporting data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
+    """Development server entry point."""
     try:
-        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=8000,
+            log_level="info",
+            access_log=False
+        )
     except Exception as e:
-        logger.error(f"Failed to start server: {e}")
+        print(f"Failed to start dashboard server: {e}")
         raise
