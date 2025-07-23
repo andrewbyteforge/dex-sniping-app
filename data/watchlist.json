@@ -896,7 +896,145 @@
         "action": null
       },
       "last_updated": "2025-07-23T10:42:10.561120"
+    },
+    {
+      "token_address": "0x23C79F0453bCeB4B2AcfF933f77728c953ea2E02",
+      "token_symbol": "ANI",
+      "token_name": "Anime",
+      "chain": "BASE",
+      "added_at": "2025-07-23T10:43:56.291867",
+      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.13333333333333333,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T10:43:56.291867"
+    },
+    {
+      "token_address": "0xd5d827cD3471f51C76f709109bB79d80Be65486f",
+      "token_symbol": "💡IDEA",
+      "token_name": "💡IDEA",
+      "chain": "BASE",
+      "added_at": "2025-07-23T10:44:10.533594",
+      "reason": "Auto-added: Score 0.35, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.10666666666666667,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T10:44:10.533594"
+    },
+    {
+      "token_address": "0x755f6ee1D7c743BE234B397570D749D463d77A21",
+      "token_symbol": "🌍EARTH",
+      "token_name": "🌍EARTH",
+      "chain": "BASE",
+      "added_at": "2025-07-23T10:44:12.664638",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T10:44:12.664638"
+    },
+    {
+      "token_address": "0x886C17d0610C7D04B9566c8F46F631590866309B",
+      "token_symbol": "BASE_0x886C",
+      "token_name": "BaseToken_0x886C17",
+      "chain": "BASE",
+      "added_at": "2025-07-23T10:44:21.316597",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T10:44:21.316597"
+    },
+    {
+      "token_address": "0x93cc19eD944662826a7672Ad92f28dE5FBDd27B7",
+      "token_symbol": "QudeAI",
+      "token_name": "X1000XQudeAI",
+      "chain": "BASE",
+      "added_at": "2025-07-23T10:44:30.825387",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T10:44:30.825387"
+    },
+    {
+      "token_address": "0x06847C1dfd8B8a1E24F4DC8dE2D003e3A41EcF05",
+      "token_symbol": "TRUMP",
+      "token_name": "TRUMP",
+      "chain": "BASE",
+      "added_at": "2025-07-23T10:44:32.962047",
+      "reason": "Auto-added: Score 0.35, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.10666666666666667,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T10:44:32.962047"
     }
   ],
-  "last_saved": "2025-07-23T10:42:10.562158"
+  "last_saved": "2025-07-23T10:44:32.962047"
 }
