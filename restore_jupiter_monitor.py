@@ -1,4 +1,23 @@
 """
+Restore Jupiter monitor to a working state with proper filtering.
+"""
+
+import os
+import shutil
+
+def restore_jupiter_monitor():
+    """Restore the Jupiter monitor to a clean working state."""
+    
+    monitor_path = "monitors/jupiter_solana_monitor.py"
+    backup_path = "monitors/jupiter_solana_monitor_backup.py"
+    
+    # First, make a backup of the broken file
+    if os.path.exists(monitor_path):
+        shutil.copy(monitor_path, backup_path)
+        print(f"✅ Backed up broken file to {backup_path}")
+    
+    # Create a clean, working Jupiter monitor
+    clean_monitor = '''"""
 Jupiter Solana monitor for detecting new tokens via Jupiter aggregator.
 Filters out known tokens and shows only potentially new opportunities.
 """
@@ -199,3 +218,19 @@ class JupiterSolanaMonitor(BaseMonitor):
         if self.session:
             await self.session.close()
             self.session = None
+'''
+    
+    # Write the clean monitor
+    with open(monitor_path, 'w', encoding='utf-8') as f:
+        f.write(clean_monitor)
+    
+    print("✅ Jupiter monitor restored to working state!")
+    print("\n📋 Features:")
+    print("   - Filters out known tokens")
+    print("   - Skips wrapped/bridge tokens")
+    print("   - Limits to 10 tokens per check")
+    print("   - Clean, working code")
+    print("\n✅ You can now run: python main_with_trading.py")
+
+if __name__ == "__main__":
+    restore_jupiter_monitor()

@@ -2692,12 +2692,12 @@
       "last_updated": "2025-07-23T12:45:18.620463"
     },
     {
-      "token_address": "0x0f9F7BfA302f44BE6a3b5E2026AE80746D9dDf8E",
-      "token_symbol": "SLOTH",
-      "token_name": "SLOTH",
+      "token_address": "0xFcc7A97De36eCc74d20acea2f20aECa7986f4E07",
+      "token_symbol": "Valentine",
+      "token_name": "Valentine",
       "chain": "BASE",
-      "added_at": "2025-07-23T12:45:59.204471",
-      "reason": "Auto-added: Score 0.35, NEUTRAL confidence",
+      "added_at": "2025-07-23T13:37:19.113747",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
       "score": 0.0,
       "risk_level": "high",
       "price_when_added": null,
@@ -2708,12 +2708,104 @@
       "metadata": {
         "liquidity_usd": 0.0,
         "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T13:37:19.113747"
+    },
+    {
+      "token_address": "0x69a7d1C805264e4e8396CE788C84c15A89Aa29ad",
+      "token_symbol": "SLEEPLESS",
+      "token_name": "SLEEPLESS COIN",
+      "chain": "BASE",
+      "added_at": "2025-07-23T13:38:23.945306",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T13:38:23.945306"
+    },
+    {
+      "token_address": "0x170B718Dd2527065f8bBCC2E11566291FD64B122",
+      "token_symbol": "SWASTIKA",
+      "token_name": "SWASTIKA",
+      "chain": "BASE",
+      "added_at": "2025-07-23T13:38:42.377534",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T13:38:42.377534"
+    },
+    {
+      "token_address": "0x4d9b54B457416c777B93f230F06cC88272e60968",
+      "token_symbol": "TEST",
+      "token_name": "TEST",
+      "chain": "BASE",
+      "added_at": "2025-07-23T13:39:18.694928",
+      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.13333333333333333,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T13:39:18.694928"
+    },
+    {
+      "token_address": "0xBcca60bB61934080951369a648Fb03DF4F96263C",
+      "token_symbol": "aUSDC",
+      "token_name": "Aave interest bearing USDC",
+      "chain": "ETHEREUM",
+      "added_at": "2025-07-23T13:50:26.978358",
+      "reason": "Auto-added: Score 0.45, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "low",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "Uniswap V2",
         "social_score": 0.10666666666666667,
         "confidence": null,
         "action": null
       },
-      "last_updated": "2025-07-23T12:45:59.204471"
+      "last_updated": "2025-07-23T13:50:26.978358"
     }
   ],
-  "last_saved": "2025-07-23T12:45:59.205497"
+  "last_saved": "2025-07-23T13:50:26.978358"
 }
