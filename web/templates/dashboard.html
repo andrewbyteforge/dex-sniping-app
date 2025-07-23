@@ -498,884 +498,551 @@
     </div>
 
     <script>
-        // Dashboard state
-        let dashboardData = {
-            opportunities: [],
-            recentActivity: [],
-            stats: {
-                totalOpportunities: 0,
-                highConfidence: 0,
-                activeChains: 3,
-                analysisRate: 0
+    // Dashboard state
+    let dashboardData = {
+        opportunities: [],
+        recentActivity: [],
+        stats: {
+            totalOpportunities: 0,
+            highConfidence: 0,
+            activeChains: 3,
+            analysisRate: 0
+        }
+    };
+
+    // Auto-refresh settings
+    let autoRefreshEnabled = true;
+    let autoRefreshTimer;
+    let ws;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+
+    // Initialize dashboard
+    function initDashboard() {
+        console.log('🚀 Initializing dashboard...');
+        updateStats();
+        renderOpportunities();
+        renderRecentActivity();
+        startAutoRefresh();
+        connectWebSocket();
+        console.log('✅ Dashboard initialized');
+    }
+
+    // Auto-refresh functionality
+    function startAutoRefresh() {
+        if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+        console.log('🔄 Starting auto-refresh (5s interval)');
+        loadRealData();
+        autoRefreshTimer = setInterval(() => {
+            if (autoRefreshEnabled) {
+                console.log('🔄 Auto-refreshing...');
+                loadRealData();
+                updateAgeTimestamps();
             }
-        };
+        }, 5000);
+    }
 
-        // Auto-refresh settings
-        let autoRefreshEnabled = true;
-        let autoRefreshTimer;
-        let ws;
-        let reconnectAttempts = 0;
-        const maxReconnectAttempts = 5;
+    function toggleAutoRefresh() {
+        autoRefreshEnabled = !autoRefreshEnabled;
+        const btn = document.getElementById('auto-refresh-btn-text');
+        const indicator = document.querySelector('.status-indicator span');
+        if (autoRefreshEnabled) {
+            btn.textContent = 'Disable Auto-Refresh';
+            indicator.textContent = 'Auto-Refresh Active';
+            console.log('✅ Auto-refresh enabled');
+        } else {
+            btn.textContent = 'Enable Auto-Refresh';
+            indicator.textContent = 'Auto-Refresh Disabled';
+            console.log('❌ Auto-refresh disabled');
+        }
+    }
 
-        // Initialize dashboard
-        function initDashboard() {
-            console.log('🚀 Initializing dashboard...');
+    // Load real data from API
+    async function loadRealData() {
+        try {
+            const opportunities = await apiRequest('/opportunities');
+            if (opportunities && opportunities.length > 0) {
+                dashboardData.opportunities = opportunities.map(opp => ({
+                    token: { symbol: opp.token_symbol, address: opp.token_address },
+                    chain: opp.chain ? opp.chain.toLowerCase() : '',
+                    risk: opp.risk_level,
+                    recommendation: opp.recommendation,
+                    confidence: opp.confidence,
+                    score: opp.score,
+                    liquidity: `$${(opp.liquidity_usd / 1000).toFixed(0)}K`,
+                    age: `${opp.age_minutes}m`,
+                    detected_at: new Date(Date.now() - opp.age_minutes * 60000),
+                    metadata: opp.metadata || {},
+                    liquidity: {
+                        dex_name: opp.dex_name || '',
+                        liquidity_usd: opp.liquidity_usd || 0,
+                        pair_address: opp.pair_address || ''
+                    }
+                }));
+                console.log(`📊 Loaded ${opportunities.length} opportunities`);
+            }
+
+            const stats = await apiRequest('/stats');
+            if (stats) {
+                dashboardData.stats = {
+                    totalOpportunities: stats.total_opportunities || 0,
+                    highConfidence: stats.high_confidence || 0,
+                    activeChains: stats.active_chains || 3,
+                    analysisRate: stats.analysis_rate || 0
+                };
+            }
+
+            const trades = await apiRequest('/trades');
+            if (trades && trades.trades) {
+                dashboardData.recentActivity = trades.trades.slice(0, 20).map(trade => ({
+                    time: new Date(trade.created_at).toLocaleTimeString(),
+                    token: trade.token_symbol,
+                    chain: trade.chain,
+                    risk: 'unknown',
+                    recommendation: trade.trade_type,
+                    status: trade.status
+                }));
+            }
+
             updateStats();
             renderOpportunities();
             renderRecentActivity();
-            
-            // Start auto-refresh
-            startAutoRefresh();
-            
-            // Start WebSocket
-            connectWebSocket();
-            
-            console.log('✅ Dashboard initialized');
+        } catch (error) {
+            console.error('❌ Failed to load data:', error);
+            showNotification('Failed to refresh data', 'error');
         }
-
-        // Auto-refresh functionality
-        function startAutoRefresh() {
-            if (autoRefreshTimer) {
-                clearInterval(autoRefreshTimer);
-            }
-            
-            console.log('🔄 Starting auto-refresh (5s interval)');
-            
-            // Initial load
-            loadRealData();
-            
-            // Set up timer
-            autoRefreshTimer = setInterval(() => {
-                if (autoRefreshEnabled) {
-                    console.log('🔄 Auto-refreshing...');
-                    loadRealData();
-                    updateAgeTimestamps();
-                }
-            }, 5000);
-        }
-
-        function toggleAutoRefresh() {
-            autoRefreshEnabled = !autoRefreshEnabled;
-            const btn = document.getElementById('auto-refresh-btn-text');
-            const indicator = document.querySelector('.status-indicator span');
-            
-            if (autoRefreshEnabled) {
-                btn.textContent = 'Disable Auto-Refresh';
-                indicator.textContent = 'Auto-Refresh Active';
-                console.log('✅ Auto-refresh enabled');
-            } else {
-                btn.textContent = 'Enable Auto-Refresh';
-                indicator.textContent = 'Auto-Refresh Disabled';
-                console.log('❌ Auto-refresh disabled');
-            }
-        }
-
-        // Load real data from API
-        async function loadRealData() {
-            try {
-                // Load opportunities
-                const opportunities = await apiRequest('/opportunities');
-                
-                if (opportunities && opportunities.length > 0) {
-                    dashboardData.opportunities = opportunities.map(opp => ({
-                        token: { symbol: opp.token_symbol, address: opp.token_address },
-                        chain: opp.chain.toLowerCase(),
-                        risk: opp.risk_level,
-                        recommendation: opp.recommendation,
-                        confidence: opp.confidence,
-                        score: opp.score,
-                        liquidity: `$${(opp.liquidity_usd / 1000).toFixed(0)}K`,
-                        age: `${opp.age_minutes}m`,
-                        detected_at: new Date(Date.now() - opp.age_minutes * 60000)
-                    }));
-                    
-                    console.log(`📊 Loaded ${opportunities.length} opportunities`);
-                }
-                
-                // Load stats
-                const stats = await apiRequest('/stats');
-                if (stats) {
-                    dashboardData.stats = {
-                        totalOpportunities: stats.total_opportunities || 0,
-                        highConfidence: stats.high_confidence || 0,
-                        activeChains: stats.active_chains || 3,
-                        analysisRate: stats.analysis_rate || 0
-                    };
-                }
-                
-                // Load trade history
-                const trades = await apiRequest('/trades');
-                if (trades && trades.trades) {
-                    dashboardData.recentActivity = trades.trades.slice(0, 20).map(trade => ({
-                        time: new Date(trade.created_at).toLocaleTimeString(),
-                        token: trade.token_symbol,
-                        chain: trade.chain,
-                        risk: 'unknown',
-                        recommendation: trade.trade_type,
-                        status: trade.status
-                    }));
-                }
-                
-                // Update displays
-                updateStats();
-                renderOpportunities();
-                renderRecentActivity();
-                
-            } catch (error) {
-                console.error('❌ Failed to load data:', error);
-                showNotification('Failed to refresh data', 'error');
-            }
-        }
-
-        // Update age timestamps
-        function updateAgeTimestamps() {
-            dashboardData.opportunities.forEach(opp => {
-                if (opp.detected_at) {
-                    const ageMinutes = Math.floor((Date.now() - opp.detected_at.getTime()) / 60000);
-                    opp.age = `${ageMinutes}m`;
-                }
-            });
-            renderOpportunities();
-        }
-
-        // API request function
-        async function apiRequest(endpoint, options = {}) {
-            try {
-                const response = await fetch(`/api${endpoint}`, {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...options.headers
-                    },
-                    ...options
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`API request failed: ${response.statusText}`);
-                }
-                
-                return await response.json();
-            } catch (error) {
-                console.error('API request failed:', error);
-                throw error;
-            }
-        }
-
-        // WebSocket connection
-        function connectWebSocket() {
-            try {
-                console.log('🌐 Connecting WebSocket...');
-                ws = new WebSocket('ws://localhost:8000/ws');
-                
-                ws.onopen = function(event) {
-                    console.log('✅ WebSocket connected');
-                    reconnectAttempts = 0;
-                    
-                    ws.send(JSON.stringify({
-                        type: 'subscribe',
-                        topics: ['opportunities', 'trades', 'stats']
-                    }));
-                };
-                
-                ws.onmessage = function(event) {
-                    const message = JSON.parse(event.data);
-                    console.log('📨 WebSocket message:', message.type);
-                    handleWebSocketMessage(message);
-                };
-                
-                ws.onclose = function(event) {
-                    console.log('❌ WebSocket disconnected');
-                    
-                    if (reconnectAttempts < maxReconnectAttempts) {
-                        reconnectAttempts++;
-                        console.log(`🔄 Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`);
-                        setTimeout(connectWebSocket, 3000 * reconnectAttempts);
-                    }
-                };
-                
-                ws.onerror = function(error) {
-                    console.error('WebSocket error:', error);
-                };
-                
-            } catch (error) {
-                console.error('Failed to connect WebSocket:', error);
-            }
-        }
-
-        function handleWebSocketMessage(message) {
-            switch (message.type) {
-                case 'new_opportunity':
-                    console.log('🎯 New opportunity via WebSocket:', message.data.token_symbol);
-                    // Force refresh data to get latest
-                    loadRealData();
-                    showNotification(`New opportunity: ${message.data.token_symbol}`, 'success');
-                    break;
-                case 'trade_executed':
-                    showNotification(`Trade executed: ${message.data.token_symbol}`, 'success');
-                    break;
-                case 'stats_update':
-                    updateStatsFromWS(message.data);
-                    break;
-                case 'subscribed':
-                    console.log('✅ Subscribed to WebSocket updates');
-                    break;
-                default:
-                    console.log('Unknown message type:', message.type);
-            }
-        }
-
-        function updateStatsFromWS(data) {
-            Object.assign(dashboardData.stats, data);
-            updateStats();
-        }
-
-        // Update statistics
-        function updateStats() {
-            document.getElementById('total-opportunities').textContent = dashboardData.stats.totalOpportunities;
-            document.getElementById('high-confidence').textContent = dashboardData.stats.highConfidence;
-            document.getElementById('active-chains').textContent = dashboardData.stats.activeChains;
-            document.getElementById('analysis-rate').textContent = dashboardData.stats.analysisRate;
-        }
-
-        // Render opportunities
-// Update the renderOpportunities function in the existing dashboard.html
-
-function renderOpportunities() {
-    const container = document.getElementById('opportunity-list');
-    container.innerHTML = '';
-
-    if (dashboardData.opportunities.length === 0) {
-        container.innerHTML = '<div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">No opportunities detected yet...</div>';
-        return;
     }
 
-    dashboardData.opportunities.forEach((opp, index) => {
-        const item = document.createElement('div');
-        item.className = 'opportunity-item';
-        item.innerHTML = `
-            <div class="opportunity-header">
-                <span class="token-symbol">${opp.token.symbol}</span>
-                <span class="risk-badge risk-${opp.risk}">${opp.risk}</span>
-            </div>
-            <div class="opportunity-details">
-                <span class="chain-badge chain-${opp.chain}">${opp.chain.toUpperCase()}</span>
-                Score: ${opp.score.toFixed(2)} | Liquidity: ${opp.liquidity} | Age: ${opp.age}
-                <span class="recommendation rec-${opp.recommendation.toLowerCase().replace('_', '-')}">${opp.recommendation}</span>
-                <div style="margin-top: 8px;">
-                    <button class="action-button" onclick="executeTrade('${opp.token.symbol}')">Trade</button>
-                    <button class="action-button" onclick="viewTokenDetails(${index})">Details</button>
+    function updateAgeTimestamps() {
+        dashboardData.opportunities.forEach(opp => {
+            if (opp.detected_at) {
+                const ageMinutes = Math.floor((Date.now() - opp.detected_at.getTime()) / 60000);
+                opp.age = `${ageMinutes}m`;
+            }
+        });
+        renderOpportunities();
+    }
+
+    // API request function
+    async function apiRequest(endpoint, options = {}) {
+        try {
+            const response = await fetch(`/api${endpoint}`, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...options.headers
+                },
+                ...options
+            });
+            if (!response.ok) throw new Error(`API request failed: ${response.statusText}`);
+            return await response.json();
+        } catch (error) {
+            console.error('API request failed:', error);
+            throw error;
+        }
+    }
+
+    // WebSocket connection
+    function connectWebSocket() {
+        try {
+            console.log('🌐 Connecting WebSocket...');
+            ws = new WebSocket('ws://localhost:8000/ws');
+            ws.onopen = function(event) {
+                console.log('✅ WebSocket connected');
+                reconnectAttempts = 0;
+                ws.send(JSON.stringify({
+                    type: 'subscribe',
+                    topics: ['opportunities', 'trades', 'stats']
+                }));
+            };
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                console.log('📨 WebSocket message:', message.type);
+                handleWebSocketMessage(message);
+            };
+            ws.onclose = function(event) {
+                console.log('❌ WebSocket disconnected');
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    console.log(`🔄 Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`);
+                    setTimeout(connectWebSocket, 3000 * reconnectAttempts);
+                }
+            };
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+        } catch (error) {
+            console.error('Failed to connect WebSocket:', error);
+        }
+    }
+
+    function handleWebSocketMessage(message) {
+        switch (message.type) {
+            case 'new_opportunity':
+                console.log('🎯 New opportunity via WebSocket:', message.data.token_symbol);
+                loadRealData();
+                showNotification(`New opportunity: ${message.data.token_symbol}`, 'success');
+                break;
+            case 'trade_executed':
+                showNotification(`Trade executed: ${message.data.token_symbol}`, 'success');
+                break;
+            case 'stats_update':
+                updateStatsFromWS(message.data);
+                break;
+            case 'subscribed':
+                console.log('✅ Subscribed to WebSocket updates');
+                break;
+            default:
+                console.log('Unknown message type:', message.type);
+        }
+    }
+
+    function updateStatsFromWS(data) {
+        Object.assign(dashboardData.stats, data);
+        updateStats();
+    }
+
+    // Update statistics
+    function updateStats() {
+        document.getElementById('total-opportunities').textContent = dashboardData.stats.totalOpportunities;
+        document.getElementById('high-confidence').textContent = dashboardData.stats.highConfidence;
+        document.getElementById('active-chains').textContent = dashboardData.stats.activeChains;
+        document.getElementById('analysis-rate').textContent = dashboardData.stats.analysisRate;
+    }
+
+    // Render opportunities
+    function renderOpportunities() {
+        const container = document.getElementById('opportunity-list');
+        container.innerHTML = '';
+        if (dashboardData.opportunities.length === 0) {
+            container.innerHTML = '<div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">No opportunities detected yet...</div>';
+            return;
+        }
+        dashboardData.opportunities.forEach((opp, index) => {
+            const item = document.createElement('div');
+            item.className = 'opportunity-item';
+            item.innerHTML = `
+                <div class="opportunity-header">
+                    <span class="token-symbol">${opp.token.symbol}</span>
+                    <span class="risk-badge risk-${opp.risk}">${opp.risk}</span>
+                </div>
+                <div class="opportunity-details">
+                    <span class="chain-badge chain-${opp.chain}">${opp.chain.toUpperCase()}</span>
+                    Score: ${opp.score.toFixed(2)} | Liquidity: ${opp.liquidity} | Age: ${opp.age}
+                    <span class="recommendation rec-${opp.recommendation.toLowerCase().replace('_', '-')}">${opp.recommendation}</span>
+                    <div style="margin-top: 8px;">
+                        <button class="action-button" onclick="executeTrade('${opp.token.symbol}')">Trade</button>
+                        <button class="action-button" onclick="viewTokenDetails(${index})">Details</button>
+                    </div>
+                </div>
+            `;
+            container.appendChild(item);
+        });
+    }
+
+    // Enhanced viewTokenDetails/modal system
+    function viewTokenDetails(opportunityIndex) {
+        const opp = dashboardData.opportunities[opportunityIndex];
+        if (!opp) {
+            showNotification('Opportunity not found', 'error');
+            return;
+        }
+        showTokenDetailsModal(opp);
+    }
+
+    function showTokenDetailsModal(opportunity) {
+        // Remove existing modal if any
+        const existingModal = document.getElementById('token-details-modal');
+        if (existingModal) existingModal.remove();
+
+        const token = opportunity.token || {};
+        const recommendation = opportunity.metadata?.recommendation || {};
+        const reasons = Array.isArray(recommendation.reasons) ? recommendation.reasons : [];
+        const warnings = Array.isArray(recommendation.warnings) ? recommendation.warnings : [];
+        const liquidity = opportunity.liquidity || {};
+        const chain = (opportunity.chain || '').toUpperCase();
+
+        // Modal HTML
+        const modal = document.createElement('div');
+        modal.id = 'token-details-modal';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>${token.symbol || 'Unknown Token'} - Detailed Analysis</h2>
+                    <button class="modal-close" onclick="closeTokenDetailsModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="detail-section">
+                        <h3>Token Information</h3>
+                        <div class="detail-grid">
+                            <div class="detail-item"><label>Symbol:</label><span>${token.symbol || 'Unknown'}</span></div>
+                            <div class="detail-item"><label>Name:</label><span>${token.name || 'Unknown'}</span></div>
+                            <div class="detail-item">
+                                <label>Address:</label>
+                                <span class="address-text">${token.address || 'Unknown'}</span>
+                                <button class="copy-btn" onclick="copyToClipboard('${token.address || ''}')">Copy</button>
+                            </div>
+                            <div class="detail-item"><label>Chain:</label><span class="chain-badge chain-${chain.toLowerCase()}">${chain}</span></div>
+                            <div class="detail-item"><label>Detected:</label><span>${opportunity.detected_at ? new Date(opportunity.detected_at).toLocaleString() : 'Unknown'}</span></div>
+                        </div>
+                    </div>
+                    <div class="detail-section">
+                        <h3>Risk Analysis</h3>
+                        <div class="detail-grid">
+                            <div class="detail-item"><label>Risk Level:</label><span class="risk-badge risk-${opportunity.risk}">${(opportunity.risk || '').toUpperCase()}</span></div>
+                            <div class="detail-item"><label>Security Score:</label><span>${opportunity.score ? opportunity.score.toFixed(3) : 'N/A'}/1.0</span></div>
+                            <div class="detail-item"><label>Recommendation:</label><span class="recommendation rec-${(opportunity.recommendation || '').toLowerCase().replace('_', '-')}">${opportunity.recommendation || 'N/A'}</span></div>
+                            <div class="detail-item"><label>Confidence:</label><span>${opportunity.confidence || 'N/A'}</span></div>
+                        </div>
+                        ${warnings.length > 0 ? `
+                        <div class="warnings-section">
+                            <h4>⚠️ Risk Warnings</h4>
+                            <ul class="warning-list">${warnings.map(warning => `<li>${warning}</li>`).join('')}</ul>
+                        </div>` : ''}
+                    </div>
+                    <div class="detail-section">
+                        <h3>Liquidity Information</h3>
+                        <div class="detail-grid">
+                            <div class="detail-item"><label>DEX:</label><span>${liquidity.dex_name || 'Unknown'}</span></div>
+                            <div class="detail-item"><label>Liquidity USD:</label><span>$${liquidity.liquidity_usd ? liquidity.liquidity_usd.toLocaleString() : 'N/A'}</span></div>
+                            <div class="detail-item">
+                                <label>Pair Address:</label>
+                                <span class="address-text">${liquidity.pair_address || 'N/A'}</span>
+                                <button class="copy-btn" onclick="copyToClipboard('${liquidity.pair_address || ''}')">Copy</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="detail-section">
+                        <h3>Trading Recommendation</h3>
+                        <div class="recommendation-box rec-${(opportunity.recommendation || '').toLowerCase().replace('_', '-')}">
+                            <div class="rec-header">
+                                <span class="rec-action">${opportunity.recommendation || 'N/A'}</span>
+                                <span class="rec-confidence">${recommendation.confidence || 'UNKNOWN'} Confidence</span>
+                            </div>
+                            <div class="rec-score">Score: ${opportunity.score ? opportunity.score.toFixed(3) : 'N/A'}</div>
+                            ${reasons.length > 0 ? `
+                            <div class="reasons-section">
+                                <h4>✅ Positive Factors</h4>
+                                <ul class="reason-list">${reasons.map(reason => `<li>${reason}</li>`).join('')}</ul>
+                            </div>` : ''}
+                        </div>
+                    </div>
+                    ${(chain.includes('SOLANA') || opportunity.metadata?.solana_source) ? `
+                    <div class="detail-section">
+                        <h3>Solana Specific</h3>
+                        <div class="detail-grid">
+                            ${opportunity.metadata?.solana_source ? `<div class="detail-item"><label>Source:</label><span>${opportunity.metadata.solana_source}</span></div>` : ''}
+                            ${opportunity.metadata?.market_cap_usd ? `<div class="detail-item"><label>Market Cap:</label><span>$${opportunity.metadata.market_cap_usd.toLocaleString()}</span></div>` : ''}
+                            ${opportunity.metadata?.volume_24h_usd ? `<div class="detail-item"><label>Volume 24h:</label><span>$${opportunity.metadata.volume_24h_usd.toLocaleString()}</span></div>` : ''}
+                        </div>
+                    </div>` : ''}
+                    <div class="detail-section">
+                        <h3>External Links</h3>
+                        <div class="link-buttons">
+                            ${chain.includes('ETHEREUM') ? `
+                                <a href="https://etherscan.io/token/${token.address}" target="_blank" class="external-link">View on Etherscan</a>
+                                <a href="https://dexscreener.com/ethereum/${token.address}" target="_blank" class="external-link">View on DexScreener</a>
+                            ` : ''}
+                            ${chain.includes('BASE') ? `
+                                <a href="https://basescan.org/token/${token.address}" target="_blank" class="external-link">View on BaseScan</a>
+                                <a href="https://dexscreener.com/base/${token.address}" target="_blank" class="external-link">View on DexScreener</a>
+                            ` : ''}
+                            ${chain.includes('SOLANA') ? `
+                                <a href="https://solscan.io/token/${token.address}" target="_blank" class="external-link">View on Solscan</a>
+                                <a href="https://dexscreener.com/solana/${token.address}" target="_blank" class="external-link">View on DexScreener</a>
+                            ` : ''}
+                            <a href="https://www.coingecko.com/en/search_redirect?id=${token.symbol}" target="_blank" class="external-link">Search on CoinGecko</a>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="action-button" onclick="executeTrade('${token.symbol}')">Execute Trade</button>
+                    <button class="action-button" onclick="addToWatchlist('${token.symbol}')">Add to Watchlist</button>
+                    <button class="action-button danger" onclick="closeTokenDetailsModal()">Close</button>
                 </div>
             </div>
         `;
-        container.appendChild(item);
-    });
-}
 
-// Add new function for viewing token details
-function viewTokenDetails(opportunityIndex) {
-    const opp = dashboardData.opportunities[opportunityIndex];
-    if (!opp) {
-        showNotification('Opportunity not found', 'error');
-        return;
+        // Add styles for modal if not present
+        if (!document.getElementById('modal-styles')) {
+            document.head.insertAdjacentHTML('beforeend', `
+                <style id="modal-styles">
+                    .modal-overlay {
+                        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                        background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(5px);
+                        z-index: 1000; display: flex; justify-content: center; align-items: center;
+                        animation: fadeIn 0.3s ease;
+                    }
+                    .modal-content {
+                        background: linear-gradient(135deg, #1a1b3e 0%, #2a2b4e 100%);
+                        border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1);
+                        max-width: 800px; max-height: 90vh; width: 90%; overflow-y: auto;
+                        animation: slideIn 0.3s ease;
+                    }
+                    .modal-header { padding: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center; }
+                    .modal-header h2 { margin: 0; color: #00d4ff; font-size: 24px; }
+                    .modal-close { background: none; border: none; color: white; font-size: 28px; cursor: pointer; padding: 0; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center;}
+                    .modal-close:hover { background: rgba(255,255,255,0.1); }
+                    .modal-body { padding: 20px; }
+                    .detail-section { margin-bottom: 30px; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);}
+                    .detail-section h3 { margin: 0 0 15px 0; color: #00ff88; font-size: 18px; border-bottom: 1px solid rgba(0,255,136,0.3); padding-bottom: 8px; }
+                    .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
+                    .detail-item { display: flex; flex-direction: column; gap: 5px; }
+                    .detail-item label { font-weight: 600; color: rgba(255,255,255,0.7); font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+                    .detail-item span { color: white; font-size: 16px; }
+                    .address-text { font-family: monospace; word-break: break-all; font-size: 14px !important; color: #00d4ff !important; }
+                    .copy-btn { background: rgba(0,212,255,0.2); border: 1px solid rgba(0,212,255,0.5); color: #00d4ff; padding: 4px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; margin-top: 5px; align-self: flex-start; }
+                    .copy-btn:hover { background: rgba(0,212,255,0.3);}
+                    .recommendation-box { padding: 15px; border-radius: 8px; border-left: 4px solid;}
+                    .recommendation-box.rec-strong-buy { background: rgba(0,255,136,0.1); border-left-color: #00ff88;}
+                    .recommendation-box.rec-buy { background: rgba(0,212,255,0.1); border-left-color: #00d4ff;}
+                    .recommendation-box.rec-watch { background: rgba(255,193,7,0.1); border-left-color: #ffc107;}
+                    .recommendation-box.rec-avoid { background: rgba(255,107,53,0.1); border-left-color: #ff6b35;}
+                    .rec-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+                    .rec-action { font-size: 20px; font-weight: bold; }
+                    .rec-confidence { font-size: 14px; opacity: 0.8; }
+                    .rec-score { font-size: 16px; margin-bottom: 15px; }
+                    .warnings-section, .reasons-section { margin-top: 15px; }
+                    .warnings-section h4, .reasons-section h4 { margin: 0 0 10px 0; font-size: 16px; }
+                    .warning-list, .reason-list { margin: 0; padding-left: 20px; }
+                    .warning-list li, .reason-list li { margin-bottom: 5px; line-height: 1.4; }
+                    .link-buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+                    .external-link { display: inline-block; padding: 8px 16px; background: rgba(0,212,255,0.2); border: 1px solid rgba(0,212,255,0.5); color: #00d4ff; text-decoration: none; border-radius: 6px; font-size: 14px; transition: all 0.3s ease;}
+                    .external-link:hover { background: rgba(0,212,255,0.3); transform: translateY(-1px);}
+                    .modal-footer { padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); display: flex; gap: 10px; justify-content: flex-end; }
+                    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+                    @keyframes slideIn { from { transform: translateY(-50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+                    @media (max-width: 768px) {
+                        .modal-content { width: 95%; margin: 20px; }
+                        .detail-grid { grid-template-columns: 1fr; }
+                        .modal-footer { flex-direction: column; }
+                    }
+                    @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+                </style>
+            `);
+        }
+
+        document.body.appendChild(modal);
+
+        // Click outside closes modal
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) closeTokenDetailsModal();
+        });
     }
 
-    // Create and show modal
-    showTokenDetailsModal(opp);
-}
-
-function showTokenDetailsModal(opportunity) {
-    // Remove existing modal if any
-    const existingModal = document.getElementById('token-details-modal');
-    if (existingModal) {
-        existingModal.remove();
-    }
-
-    // Create modal HTML
-    const modal = document.createElement('div');
-    modal.id = 'token-details-modal';
-    modal.className = 'modal-overlay';
-    
-    const recommendation = opportunity.metadata?.recommendation || {};
-    const reasons = recommendation.reasons || [];
-    const warnings = recommendation.warnings || [];
-    
-    modal.innerHTML = `
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>${opportunity.token.symbol} - Detailed Analysis</h2>
-                <button class="modal-close" onclick="closeTokenDetailsModal()">&times;</button>
-            </div>
-            
-            <div class="modal-body">
-                <!-- Token Information -->
-                <div class="detail-section">
-                    <h3>Token Information</h3>
-                    <div class="detail-grid">
-                        <div class="detail-item">
-                            <label>Symbol:</label>
-                            <span>${opportunity.token.symbol}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Name:</label>
-                            <span>${opportunity.token.name || 'Unknown'}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Address:</label>
-                            <span class="address-text">${opportunity.token.address}</span>
-                            <button class="copy-btn" onclick="copyToClipboard('${opportunity.token.address}')">Copy</button>
-                        </div>
-                        <div class="detail-item">
-                            <label>Chain:</label>
-                            <span class="chain-badge chain-${opportunity.chain}">${opportunity.chain}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Detected:</label>
-                            <span>${new Date(opportunity.detected_at).toLocaleString()}</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Risk Analysis -->
-                <div class="detail-section">
-                    <h3>Risk Analysis</h3>
-                    <div class="detail-grid">
-                        <div class="detail-item">
-                            <label>Risk Level:</label>
-                            <span class="risk-badge risk-${opportunity.risk}">${opportunity.risk.toUpperCase()}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Security Score:</label>
-                            <span>${opportunity.score.toFixed(3)}/1.0</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Confidence:</label>
-                            <span class="recommendation rec-${opportunity.recommendation.toLowerCase().replace('_', '-')}">${opportunity.recommendation}</span>
-                        </div>
-                    </div>
-                    
-                    ${warnings.length > 0 ? `
-                    <div class="warnings-section">
-                        <h4>⚠️ Risk Warnings</h4>
-                        <ul class="warning-list">
-                            ${warnings.map(warning => `<li>${warning}</li>`).join('')}
-                        </ul>
-                    </div>
-                    ` : ''}
-                </div>
-
-                <!-- Liquidity Information -->
-                <div class="detail-section">
-                    <h3>Liquidity Information</h3>
-                    <div class="detail-grid">
-                        <div class="detail-item">
-                            <label>DEX:</label>
-                            <span>${opportunity.liquidity.dex_name}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Liquidity USD:</label>
-                            <span>$${opportunity.liquidity.liquidity_usd.toLocaleString()}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Pair Address:</label>
-                            <span class="address-text">${opportunity.liquidity.pair_address}</span>
-                            <button class="copy-btn" onclick="copyToClipboard('${opportunity.liquidity.pair_address}')">Copy</button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Trading Recommendation -->
-                <div class="detail-section">
-                    <h3>Trading Recommendation</h3>
-                    <div class="recommendation-box rec-${opportunity.recommendation.toLowerCase().replace('_', '-')}">
-                        <div class="rec-header">
-                            <span class="rec-action">${opportunity.recommendation}</span>
-                            <span class="rec-confidence">${recommendation.confidence || 'UNKNOWN'} Confidence</span>
-                        </div>
-                        <div class="rec-score">Score: ${opportunity.score.toFixed(3)}</div>
-                        
-                        ${reasons.length > 0 ? `
-                        <div class="reasons-section">
-                            <h4>✅ Positive Factors</h4>
-                            <ul class="reason-list">
-                                ${reasons.map(reason => `<li>${reason}</li>`).join('')}
-                            </ul>
-                        </div>
-                        ` : ''}
-                    </div>
-                </div>
-
-                <!-- Chain Specific Information -->
-                ${opportunity.chain.includes('SOLANA') ? `
-                <div class="detail-section">
-                    <h3>Solana Specific</h3>
-                    <div class="detail-grid">
-                        <div class="detail-item">
-                            <label>Source:</label>
-                            <span>${opportunity.metadata?.solana_source || 'Unknown'}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Market Cap:</label>
-                            <span>$${(opportunity.metadata?.market_cap_usd || 0).toLocaleString()}</span>
-                        </div>
-                        <div class="detail-item">
-                            <label>Volume 24h:</label>
-                            <span>$${(opportunity.metadata?.volume_24h_usd || 0).toLocaleString()}</span>
-                        </div>
-                    </div>
-                </div>
-                ` : ''}
-
-                <!-- External Links -->
-                <div class="detail-section">
-                    <h3>External Links</h3>
-                    <div class="link-buttons">
-                        ${opportunity.chain.includes('ETHEREUM') ? `
-                            <a href="https://etherscan.io/token/${opportunity.token.address}" target="_blank" class="external-link">
-                                View on Etherscan
-                            </a>
-                            <a href="https://dexscreener.com/ethereum/${opportunity.token.address}" target="_blank" class="external-link">
-                                View on DexScreener
-                            </a>
-                        ` : ''}
-                        ${opportunity.chain.includes('BASE') ? `
-                            <a href="https://basescan.org/token/${opportunity.token.address}" target="_blank" class="external-link">
-                                View on BaseScan
-                            </a>
-                            <a href="https://dexscreener.com/base/${opportunity.token.address}" target="_blank" class="external-link">
-                                View on DexScreener
-                            </a>
-                        ` : ''}
-                        ${opportunity.chain.includes('SOLANA') ? `
-                            <a href="https://solscan.io/token/${opportunity.token.address}" target="_blank" class="external-link">
-                                View on Solscan
-                            </a>
-                            <a href="https://dexscreener.com/solana/${opportunity.token.address}" target="_blank" class="external-link">
-                                View on DexScreener
-                            </a>
-                        ` : ''}
-                        <a href="https://www.coingecko.com/en/search_redirect?id=${opportunity.token.symbol}" target="_blank" class="external-link">
-                            Search on CoinGecko
-                        </a>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="modal-footer">
-                <button class="action-button" onclick="executeTrade('${opportunity.token.symbol}')">Execute Trade</button>
-                <button class="action-button" onclick="addToWatchlist('${opportunity.token.symbol}')">Add to Watchlist</button>
-                <button class="action-button danger" onclick="closeTokenDetailsModal()">Close</button>
-            </div>
-        </div>
-    `;
-
-    // Add modal styles
-    const modalStyles = `
-        <style id="modal-styles">
-            .modal-overlay {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background: rgba(0, 0, 0, 0.8);
-                backdrop-filter: blur(5px);
-                z-index: 1000;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                animation: fadeIn 0.3s ease;
-            }
-
-            .modal-content {
-                background: linear-gradient(135deg, #1a1b3e 0%, #2a2b4e 100%);
-                border-radius: 16px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                max-width: 800px;
-                max-height: 90vh;
-                width: 90%;
-                overflow-y: auto;
-                animation: slideIn 0.3s ease;
-            }
-
-            .modal-header {
-                padding: 20px;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            }
-
-            .modal-header h2 {
-                margin: 0;
-                color: #00d4ff;
-                font-size: 24px;
-            }
-
-            .modal-close {
-                background: none;
-                border: none;
-                color: white;
-                font-size: 28px;
-                cursor: pointer;
-                padding: 0;
-                width: 32px;
-                height: 32px;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-
-            .modal-close:hover {
-                background: rgba(255, 255, 255, 0.1);
-            }
-
-            .modal-body {
-                padding: 20px;
-            }
-
-            .detail-section {
-                margin-bottom: 30px;
-                padding: 20px;
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 12px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-
-            .detail-section h3 {
-                margin: 0 0 15px 0;
-                color: #00ff88;
-                font-size: 18px;
-                border-bottom: 1px solid rgba(0, 255, 136, 0.3);
-                padding-bottom: 8px;
-            }
-
-            .detail-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 15px;
-            }
-
-            .detail-item {
-                display: flex;
-                flex-direction: column;
-                gap: 5px;
-            }
-
-            .detail-item label {
-                font-weight: 600;
-                color: rgba(255, 255, 255, 0.7);
-                font-size: 14px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-
-            .detail-item span {
-                color: white;
-                font-size: 16px;
-            }
-
-            .address-text {
-                font-family: monospace;
-                word-break: break-all;
-                font-size: 14px !important;
-                color: #00d4ff !important;
-            }
-
-            .copy-btn {
-                background: rgba(0, 212, 255, 0.2);
-                border: 1px solid rgba(0, 212, 255, 0.5);
-                color: #00d4ff;
-                padding: 4px 8px;
-                border-radius: 4px;
-                font-size: 12px;
-                cursor: pointer;
-                margin-top: 5px;
-                align-self: flex-start;
-            }
-
-            .copy-btn:hover {
-                background: rgba(0, 212, 255, 0.3);
-            }
-
-            .recommendation-box {
-                padding: 15px;
-                border-radius: 8px;
-                border-left: 4px solid;
-            }
-
-            .recommendation-box.rec-strong-buy {
-                background: rgba(0, 255, 136, 0.1);
-                border-left-color: #00ff88;
-            }
-
-            .recommendation-box.rec-buy {
-                background: rgba(0, 212, 255, 0.1);
-                border-left-color: #00d4ff;
-            }
-
-            .recommendation-box.rec-watch {
-                background: rgba(255, 193, 7, 0.1);
-                border-left-color: #ffc107;
-            }
-
-            .recommendation-box.rec-avoid {
-                background: rgba(255, 107, 53, 0.1);
-                border-left-color: #ff6b35;
-            }
-
-            .rec-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 10px;
-            }
-
-            .rec-action {
-                font-size: 20px;
-                font-weight: bold;
-            }
-
-            .rec-confidence {
-                font-size: 14px;
-                opacity: 0.8;
-            }
-
-            .rec-score {
-                font-size: 16px;
-                margin-bottom: 15px;
-            }
-
-            .warnings-section, .reasons-section {
-                margin-top: 15px;
-            }
-
-            .warnings-section h4, .reasons-section h4 {
-                margin: 0 0 10px 0;
-                font-size: 16px;
-            }
-
-            .warning-list, .reason-list {
-                margin: 0;
-                padding-left: 20px;
-            }
-
-            .warning-list li, .reason-list li {
-                margin-bottom: 5px;
-                line-height: 1.4;
-            }
-
-            .link-buttons {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 10px;
-            }
-
-            .external-link {
-                display: inline-block;
-                padding: 8px 16px;
-                background: rgba(0, 212, 255, 0.2);
-                border: 1px solid rgba(0, 212, 255, 0.5);
-                color: #00d4ff;
-                text-decoration: none;
-                border-radius: 6px;
-                font-size: 14px;
-                transition: all 0.3s ease;
-            }
-
-            .external-link:hover {
-                background: rgba(0, 212, 255, 0.3);
-                transform: translateY(-1px);
-            }
-
-            .modal-footer {
-                padding: 20px;
-                border-top: 1px solid rgba(255, 255, 255, 0.1);
-                display: flex;
-                gap: 10px;
-                justify-content: flex-end;
-            }
-
-            @keyframes fadeIn {
-                from { opacity: 0; }
-                to { opacity: 1; }
-            }
-
-            @keyframes slideIn {
-                from { transform: translateY(-50px); opacity: 0; }
-                to { transform: translateY(0); opacity: 1; }
-            }
-
-            @media (max-width: 768px) {
-                .modal-content {
-                    width: 95%;
-                    margin: 20px;
-                }
-
-                .detail-grid {
-                    grid-template-columns: 1fr;
-                }
-
-                .modal-footer {
-                    flex-direction: column;
-                }
-            }
-        </style>
-    `;
-
-    // Add styles if not already added
-    if (!document.getElementById('modal-styles')) {
-        document.head.insertAdjacentHTML('beforeend', modalStyles);
-    }
-
-    // Add modal to body
-    document.body.appendChild(modal);
-
-    // Close modal when clicking outside
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) {
-            closeTokenDetailsModal();
-        }
-    });
-}
-
-function closeTokenDetailsModal() {
-    const modal = document.getElementById('token-details-modal');
-    if (modal) {
-        modal.style.animation = 'fadeOut 0.3s ease';
-        setTimeout(() => {
-            modal.remove();
-        }, 300);
-    }
-}
-
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        showNotification('Copied to clipboard!', 'success');
-    }).catch(() => {
-        // Fallback for older browsers
-        const textArea = document.createElement('textarea');
-        textArea.value = text;
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-        showNotification('Copied to clipboard!', 'success');
-    });
-}
-
-function addToWatchlist(tokenSymbol) {
-    // Placeholder for watchlist functionality
-    showNotification(`${tokenSymbol} added to watchlist!`, 'info');
-    
-    // Here you could implement actual watchlist functionality:
-    // - Store in localStorage
-    // - Send to backend API
-    // - Add to a watchlist section in the UI
-}
-
-// Add CSS for fadeOut animation
-const additionalStyles = `
-    <style>
-        @keyframes fadeOut {
-            from { opacity: 1; }
-            to { opacity: 0; }
-        }
-    </style>
-`;
-
-document.head.insertAdjacentHTML('beforeend', additionalStyles);
-
-        // Render recent activity
-        function renderRecentActivity() {
-            const tbody = document.getElementById('recent-activity');
-            tbody.innerHTML = '';
-
-            if (dashboardData.recentActivity.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: rgba(255,255,255,0.5);">No recent activity...</td></tr>';
-                return;
-            }
-
-            dashboardData.recentActivity.forEach(activity => {
-                const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>${activity.time}</td>
-                    <td>${activity.token}</td>
-                    <td><span class="chain-badge chain-${activity.chain}">${activity.chain.toUpperCase()}</span></td>
-                    <td><span class="risk-badge risk-${activity.risk}">${activity.risk}</span></td>
-                    <td><span class="recommendation rec-${activity.recommendation.toLowerCase().replace('_', '-')}">${activity.recommendation}</span></td>
-                    <td><button class="action-button" onclick="executeTrade('${activity.token}')">Trade</button></td>
-                `;
-                tbody.appendChild(row);
-            });
-        }
-
-        // Event handlers
-        function refreshData() {
-            const spinner = document.getElementById('refresh-spinner');
-            const text = document.getElementById('refresh-text');
-            
-            spinner.style.display = 'inline-block';
-            text.textContent = 'Refreshing...';
-            
-            loadRealData().then(() => {
-                spinner.style.display = 'none';
-                text.textContent = 'Manual Refresh';
-                showNotification('Data refreshed successfully', 'success');
-            }).catch(() => {
-                spinner.style.display = 'none';
-                text.textContent = 'Manual Refresh';
-                showNotification('Refresh failed', 'error');
-            });
-        }
-
-        function clearOpportunities() {
-            dashboardData.opportunities = [];
-            updateStats();
-            renderOpportunities();
-        }
-
-        function executeTrade(token) {
-            showNotification(`Trade execution for ${token} - Feature coming soon!`, 'info');
-        }
-
-        function viewDetails(token) {
-            showNotification(`Viewing details for ${token}`, 'info');
-        }
-
-        // Notification system
-        function showNotification(message, type = 'info') {
-            const notification = document.createElement('div');
-            notification.className = `notification notification-${type}`;
-            notification.innerHTML = `
-                <span>${message}</span>
-                <button onclick="this.parentElement.remove()">×</button>
-            `;
-            
-            let container = document.getElementById('notifications');
-            if (!container) {
-                container = document.createElement('div');
-                container.id = 'notifications';
-                container.style.cssText = `
-                    position: fixed;
-                    top: 20px;
-                    right: 20px;
-                    z-index: 1000;
-                    max-width: 400px;
-                `;
-                document.body.appendChild(container);
-            }
-            
-            container.appendChild(notification);
-            
+    function closeTokenDetailsModal() {
+        const modal = document.getElementById('token-details-modal');
+        if (modal) {
+            modal.style.animation = 'fadeOut 0.3s ease';
             setTimeout(() => {
-                if (notification.parentElement) {
-                    notification.remove();
-                }
-            }, 5000);
+                modal.remove();
+            }, 300);
         }
+    }
 
-        // Initialize on page load
-        document.addEventListener('DOMContentLoaded', initDashboard);
-    </script>
+    function copyToClipboard(text) {
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(() => {
+            showNotification('Copied to clipboard!', 'success');
+        }).catch(() => {
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+            showNotification('Copied to clipboard!', 'success');
+        });
+    }
+
+    function addToWatchlist(tokenSymbol) {
+        showNotification(`${tokenSymbol} added to watchlist!`, 'info');
+        // Implement your real watchlist logic here if desired
+    }
+
+    // Render recent activity
+    function renderRecentActivity() {
+        const tbody = document.getElementById('recent-activity');
+        tbody.innerHTML = '';
+        if (dashboardData.recentActivity.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: rgba(255,255,255,0.5);">No recent activity...</td></tr>';
+            return;
+        }
+        dashboardData.recentActivity.forEach(activity => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${activity.time}</td>
+                <td>${activity.token}</td>
+                <td><span class="chain-badge chain-${activity.chain}">${activity.chain.toUpperCase()}</span></td>
+                <td><span class="risk-badge risk-${activity.risk}">${activity.risk}</span></td>
+                <td><span class="recommendation rec-${activity.recommendation.toLowerCase().replace('_', '-')}">${activity.recommendation}</span></td>
+                <td><button class="action-button" onclick="executeTrade('${activity.token}')">Trade</button></td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+
+    // Event handlers
+    function refreshData() {
+        const spinner = document.getElementById('refresh-spinner');
+        const text = document.getElementById('refresh-text');
+        spinner.style.display = 'inline-block';
+        text.textContent = 'Refreshing...';
+        loadRealData().then(() => {
+            spinner.style.display = 'none';
+            text.textContent = 'Manual Refresh';
+            showNotification('Data refreshed successfully', 'success');
+        }).catch(() => {
+            spinner.style.display = 'none';
+            text.textContent = 'Manual Refresh';
+            showNotification('Refresh failed', 'error');
+        });
+    }
+
+    function clearOpportunities() {
+        dashboardData.opportunities = [];
+        updateStats();
+        renderOpportunities();
+    }
+
+    function executeTrade(token) {
+        showNotification(`Trade execution for ${token} - Feature coming soon!`, 'info');
+    }
+
+    function viewDetails(token) {
+        showNotification(`Viewing details for ${token}`, 'info');
+    }
+
+    // Notification system
+    function showNotification(message, type = 'info') {
+        const notification = document.createElement('div');
+        notification.className = `notification notification-${type}`;
+        notification.innerHTML = `
+            <span>${message}</span>
+            <button onclick="this.parentElement.remove()">×</button>
+        `;
+        let container = document.getElementById('notifications');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'notifications';
+            container.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                z-index: 1000;
+                max-width: 400px;
+            `;
+            document.body.appendChild(container);
+        }
+        container.appendChild(notification);
+        setTimeout(() => {
+            if (notification.parentElement) notification.remove();
+        }, 5000);
+    }
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', initDashboard);
+</script>
+
 </body>
 </html>

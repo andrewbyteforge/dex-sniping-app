@@ -1,6 +1,6 @@
 """
 Simplified and fixed dashboard server for DEX sniping system.
-Focuses on reliability and basic functionality.
+Focuses on reliability and basic functionality with comprehensive error handling.
 """
 
 import asyncio
@@ -36,7 +36,10 @@ app.add_middleware(
 )
 
 class SimpleDashboardServer:
-    """Simplified dashboard server with minimal dependencies."""
+    """
+    Simplified dashboard server with minimal dependencies and comprehensive error handling.
+    Focuses on reliability and basic functionality for DEX sniping operations.
+    """
     
     def __init__(self):
         """Initialize the simple dashboard server."""
@@ -58,7 +61,15 @@ class SimpleDashboardServer:
         logger.info("Simple dashboard server initialized")
 
     async def initialize(self):
-        """Initialize the dashboard server."""
+        """
+        Initialize the dashboard server.
+        
+        Returns:
+            None
+            
+        Raises:
+            Exception: If initialization fails
+        """
         try:
             logger.info("Dashboard server ready")
         except Exception as e:
@@ -66,9 +77,20 @@ class SimpleDashboardServer:
             raise
 
     async def add_opportunity(self, opportunity):
-        """Add opportunity with safe error handling."""
+        """
+        Add opportunity with comprehensive error handling and data validation.
+        
+        Args:
+            opportunity: The trading opportunity object to add
+            
+        Returns:
+            None
+            
+        Raises:
+            Exception: If opportunity processing fails completely
+        """
         try:
-            # Convert opportunity to simple dict
+            # Convert opportunity to simple dict with safe attribute access
             if hasattr(opportunity, 'token'):
                 opp_data = {
                     'token_symbol': getattr(opportunity.token, 'symbol', 'UNKNOWN'),
@@ -82,33 +104,36 @@ class SimpleDashboardServer:
                     'liquidity_usd': 0
                 }
                 
-                # Try to get additional data safely
+                # Try to get additional data safely with individual error handling
                 try:
-                    if hasattr(opportunity, 'liquidity'):
-                        opp_data['liquidity_usd'] = getattr(opportunity.liquidity, 'liquidity_usd', 0)
+                    if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
+                        opp_data['liquidity_usd'] = float(getattr(opportunity.liquidity, 'liquidity_usd', 0) or 0)
                         opp_data['dex_name'] = getattr(opportunity.liquidity, 'dex_name', 'Unknown')
                         opp_data['pair_address'] = getattr(opportunity.liquidity, 'pair_address', 'unknown')
-                except:
-                    pass
+                except Exception as liquidity_error:
+                    logger.debug(f"Error extracting liquidity data: {liquidity_error}")
                 
                 try:
-                    if hasattr(opportunity, 'contract_analysis'):
+                    if hasattr(opportunity, 'contract_analysis') and opportunity.contract_analysis:
                         risk_level = getattr(opportunity.contract_analysis, 'risk_level', None)
                         if risk_level and hasattr(risk_level, 'value'):
                             opp_data['risk_level'] = risk_level.value
-                except:
-                    pass
+                        elif risk_level:
+                            opp_data['risk_level'] = str(risk_level)
+                except Exception as contract_error:
+                    logger.debug(f"Error extracting contract analysis: {contract_error}")
                 
                 try:
-                    if hasattr(opportunity, 'metadata'):
+                    if hasattr(opportunity, 'metadata') and isinstance(opportunity.metadata, dict):
                         recommendation = opportunity.metadata.get('recommendation', {})
-                        opp_data['recommendation'] = recommendation.get('action', 'UNKNOWN')
-                        opp_data['confidence'] = recommendation.get('confidence', 'UNKNOWN')
-                        opp_data['score'] = recommendation.get('score', 0.0)
-                        opp_data['reasons'] = recommendation.get('reasons', [])
-                        opp_data['warnings'] = recommendation.get('warnings', [])
-                except:
-                    pass
+                        if isinstance(recommendation, dict):
+                            opp_data['recommendation'] = recommendation.get('action', 'UNKNOWN')
+                            opp_data['confidence'] = recommendation.get('confidence', 'UNKNOWN')
+                            opp_data['score'] = float(recommendation.get('score', 0.0))
+                            opp_data['reasons'] = recommendation.get('reasons', [])
+                            opp_data['warnings'] = recommendation.get('warnings', [])
+                except Exception as metadata_error:
+                    logger.debug(f"Error extracting metadata: {metadata_error}")
                 
             else:
                 # Fallback for invalid objects
@@ -121,7 +146,11 @@ class SimpleDashboardServer:
                     'recommendation': 'UNKNOWN',
                     'confidence': 'UNKNOWN',
                     'score': 0.0,
-                    'liquidity_usd': 0
+                    'liquidity_usd': 0,
+                    'dex_name': 'Unknown',
+                    'pair_address': 'unknown',
+                    'reasons': [],
+                    'warnings': []
                 }
             
             # Add to opportunities list (keep last 100)
@@ -129,45 +158,127 @@ class SimpleDashboardServer:
             if len(self.opportunities) > 100:
                 self.opportunities.pop(0)
             
-            # Update stats
+            # Update stats safely
             self.stats["total_opportunities"] += 1
             if opp_data.get('confidence') == 'HIGH':
                 self.stats["high_confidence"] += 1
             
-            # Broadcast to clients
-            await self.broadcast_to_clients({
-                "type": "new_opportunity",
-                "data": opp_data
-            })
+            # Broadcast to clients with error handling
+            try:
+                await self.broadcast_to_clients({
+                    "type": "new_opportunity",
+                    "data": opp_data
+                })
+            except Exception as broadcast_error:
+                logger.error(f"Error broadcasting opportunity: {broadcast_error}")
             
-            logger.info(f"Added opportunity: {opp_data['token_symbol']}")
+            logger.info(f"Added opportunity: {opp_data['token_symbol']} on {opp_data['chain']}")
             
         except Exception as e:
             logger.error(f"Error adding opportunity: {e}")
+            # Don't re-raise to prevent system crashes
 
     async def broadcast_to_clients(self, message: Dict):
-        """Broadcast message to connected WebSocket clients."""
+        """
+        Broadcast message to connected WebSocket clients with improved error handling.
+        
+        Args:
+            message (Dict): Message to broadcast to all connected clients
+            
+        Returns:
+            None
+        """
         if not self.connected_clients:
             return
         
         disconnected = []
-        message_str = json.dumps(message)
         
-        for client in self.connected_clients:
+        try:
+            message_str = json.dumps(message)
+        except Exception as json_error:
+            logger.error(f"Error serializing message: {json_error}")
+            return
+        
+        # Create a copy of the list to avoid modification during iteration
+        clients_to_send = self.connected_clients.copy()
+        
+        for client in clients_to_send:
             try:
+                # Check if client is still connected before sending
+                if client.client_state.value == 3:  # DISCONNECTED state
+                    disconnected.append(client)
+                    continue
+                    
                 await client.send_text(message_str)
-            except:
+                
+            except Exception as send_error:
+                error_msg = str(send_error).lower()
+                if any(keyword in error_msg for keyword in ['disconnect', 'closed', 'connection']):
+                    logger.debug(f"Client disconnected during broadcast: {send_error}")
+                else:
+                    logger.warning(f"Error sending to client: {send_error}")
                 disconnected.append(client)
         
         # Remove disconnected clients
         for client in disconnected:
             if client in self.connected_clients:
                 self.connected_clients.remove(client)
+                
+        if disconnected:
+            logger.info(f"Removed {len(disconnected)} disconnected clients. Active: {len(self.connected_clients)}")
+
+    async def cleanup_dead_connections(self):
+        """
+        Proactively clean up dead WebSocket connections.
+        
+        Returns:
+            None
+        """
+        try:
+            if not self.connected_clients:
+                return
+                
+            dead_clients = []
+            
+            for client in self.connected_clients.copy():
+                try:
+                    # Check client state
+                    if hasattr(client, 'client_state') and client.client_state.value == 3:  # DISCONNECTED
+                        dead_clients.append(client)
+                    elif hasattr(client, 'application_state') and client.application_state.value in [2, 3]:  # DISCONNECTING or DISCONNECTED
+                        dead_clients.append(client)
+                except Exception as check_error:
+                    logger.debug(f"Error checking client state: {check_error}")
+                    # If we can't check the state, assume it's dead
+                    dead_clients.append(client)
+            
+            # Remove dead clients
+            for client in dead_clients:
+                if client in self.connected_clients:
+                    self.connected_clients.remove(client)
+            
+            if dead_clients:
+                logger.info(f"Cleaned up {len(dead_clients)} dead connections. Active: {len(self.connected_clients)}")
+                
+        except Exception as e:
+            logger.error(f"Error during connection cleanup: {e}")
 
     async def update_analysis_rate(self, rate: int):
-        """Update analysis rate."""
+        """
+        Update analysis rate and broadcast to clients with connection cleanup.
+        
+        Args:
+            rate (int): New analysis rate value
+            
+        Returns:
+            None
+        """
         try:
             self.stats["analysis_rate"] = rate
+            
+            # Clean up dead connections before broadcasting
+            await self.cleanup_dead_connections()
+            
             await self.broadcast_to_clients({
                 "type": "stats_update",
                 "data": {"analysis_rate": rate}
@@ -176,10 +287,25 @@ class SimpleDashboardServer:
             logger.error(f"Error updating analysis rate: {e}")
 
     def get_safe_portfolio_summary(self) -> Dict[str, Any]:
-        """Get portfolio summary safely."""
+        """
+        Get portfolio summary with comprehensive error handling.
+        
+        Returns:
+            Dict[str, Any]: Portfolio summary or error information
+        """
         try:
             if self.position_manager and hasattr(self.position_manager, 'get_portfolio_summary'):
-                return self.position_manager.get_portfolio_summary()
+                try:
+                    return self.position_manager.get_portfolio_summary()
+                except Exception as portfolio_error:
+                    logger.error(f"Error getting portfolio from position manager: {portfolio_error}")
+                    return {
+                        'total_positions': 0,
+                        'total_trades': 0,
+                        'success_rate': 0.0,
+                        'total_pnl': 0.0,
+                        'status': f'Position manager error: {str(portfolio_error)}'
+                    }
             else:
                 return {
                     'total_positions': 0,
@@ -190,39 +316,87 @@ class SimpleDashboardServer:
                 }
         except Exception as e:
             logger.error(f"Error getting portfolio summary: {e}")
-            return {'error': str(e)}
+            return {'error': str(e), 'status': 'Portfolio summary failed'}
 
 # Global dashboard instance
 dashboard_server = SimpleDashboardServer()
 
 @app.on_event("startup")
 async def startup_event():
-    """Startup event handler."""
+    """
+    Startup event handler with periodic connection cleanup.
+    
+    Returns:
+        None
+        
+    Raises:
+        Exception: If startup fails
+    """
     try:
         await dashboard_server.initialize()
-        logger.info("Dashboard startup complete")
+        
+        # Start periodic cleanup task
+        asyncio.create_task(periodic_cleanup_task())
+        
+        logger.info("Dashboard startup complete with periodic cleanup enabled")
     except Exception as e:
         logger.error(f"Dashboard startup error: {e}")
 
+async def periodic_cleanup_task():
+    """
+    Periodic task to clean up dead WebSocket connections.
+    
+    Returns:
+        None
+    """
+    while True:
+        try:
+            await asyncio.sleep(30)  # Clean up every 30 seconds
+            await dashboard_server.cleanup_dead_connections()
+        except Exception as e:
+            logger.error(f"Error in periodic cleanup task: {e}")
+            await asyncio.sleep(60)  # Wait longer on error
+
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    """Serve the main dashboard page."""
+    """
+    Serve the main dashboard page with error handling.
+    
+    Returns:
+        HTMLResponse: Dashboard HTML content
+        
+    Raises:
+        HTTPException: If dashboard cannot be served
+    """
     try:
         # Check if custom template exists
         template_path = "web/templates/dashboard.html"
         if os.path.exists(template_path):
-            with open(template_path, 'r', encoding='utf-8') as f:
-                return HTMLResponse(content=f.read())
+            try:
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    return HTMLResponse(content=content)
+            except Exception as file_error:
+                logger.error(f"Error reading custom template: {file_error}")
+                # Fall back to basic dashboard
         
         # Return basic dashboard
         return HTMLResponse(content=get_basic_dashboard_html())
         
     except Exception as e:
         logger.error(f"Dashboard page error: {e}")
-        return HTMLResponse(content=f"<h1>Dashboard Error</h1><p>{e}</p>", status_code=500)
+        return HTMLResponse(
+            content=f"<h1>Dashboard Error</h1><p>Error: {e}</p><p>Check server logs for details.</p>", 
+            status_code=500
+        )
 
 def get_basic_dashboard_html() -> str:
-    """Get basic dashboard HTML with detailed modal functionality."""
+    """
+    Get basic dashboard HTML with detailed modal functionality and comprehensive error handling.
+    
+    Returns:
+        str: Complete HTML dashboard content
+    """
     return """
     <!DOCTYPE html>
     <html lang="en">
@@ -303,6 +477,7 @@ def get_basic_dashboard_html() -> str:
             .risk-low { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
             .risk-medium { background: rgba(255, 193, 7, 0.3); color: #FFC107; }
             .risk-high { background: rgba(244, 67, 54, 0.3); color: #F44336; }
+            .risk-critical { background: rgba(139, 0, 0, 0.3); color: #8B0000; }
             .risk-unknown { background: rgba(158, 158, 158, 0.3); color: #9E9E9E; }
             
             .opportunity-details {
@@ -329,6 +504,7 @@ def get_basic_dashboard_html() -> str:
             }
             .rec-strong_buy, .rec-strong-buy { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
             .rec-buy { background: rgba(33, 150, 243, 0.3); color: #2196F3; }
+            .rec-small_buy, .rec-small-buy { background: rgba(33, 150, 243, 0.2); color: #2196F3; }
             .rec-watch { background: rgba(255, 193, 7, 0.3); color: #FFC107; }
             .rec-avoid { background: rgba(244, 67, 54, 0.3); color: #F44336; }
             .rec-unknown { background: rgba(158, 158, 158, 0.3); color: #9E9E9E; }
@@ -368,6 +544,7 @@ def get_basic_dashboard_html() -> str:
                 padding: 10px;
                 border-radius: 5px;
                 font-size: 12px;
+                z-index: 999;
             }
             .connected { background: #4CAF50; }
             .disconnected { background: #f44336; }
@@ -425,6 +602,7 @@ def get_basic_dashboard_html() -> str:
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                transition: background 0.3s ease;
             }
             .modal-close:hover {
                 background: rgba(255, 255, 255, 0.1);
@@ -468,9 +646,12 @@ def get_basic_dashboard_html() -> str:
                 word-break: break-all;
             }
             .address-text {
-                font-family: monospace;
+                font-family: 'Courier New', monospace;
                 font-size: 12px !important;
                 color: #2196F3 !important;
+                background: rgba(0, 0, 0, 0.3);
+                padding: 3px 6px;
+                border-radius: 3px;
             }
             .copy-btn {
                 background: rgba(33, 150, 243, 0.3);
@@ -482,6 +663,7 @@ def get_basic_dashboard_html() -> str:
                 cursor: pointer;
                 margin-top: 3px;
                 align-self: flex-start;
+                transition: background 0.3s ease;
             }
             .copy-btn:hover {
                 background: rgba(33, 150, 243, 0.5);
@@ -508,6 +690,22 @@ def get_basic_dashboard_html() -> str:
                 transform: translateY(-1px);
             }
             
+            /* Scrollbar styling */
+            .modal-content::-webkit-scrollbar {
+                width: 8px;
+            }
+            .modal-content::-webkit-scrollbar-track {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+            }
+            .modal-content::-webkit-scrollbar-thumb {
+                background: rgba(255, 255, 255, 0.3);
+                border-radius: 4px;
+            }
+            .modal-content::-webkit-scrollbar-thumb:hover {
+                background: rgba(255, 255, 255, 0.5);
+            }
+            
             @keyframes fadeIn {
                 from { opacity: 0; }
                 to { opacity: 1; }
@@ -521,6 +719,7 @@ def get_basic_dashboard_html() -> str:
                 .modal-content { width: 95%; margin: 20px; }
                 .detail-grid { grid-template-columns: 1fr; }
                 .opportunity-header { flex-direction: column; align-items: flex-start; gap: 5px; }
+                .stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
             }
         </style>
     </head>
@@ -528,7 +727,7 @@ def get_basic_dashboard_html() -> str:
         <div class="container">
             <div class="header">
                 <h1>🚀 DEX Sniping Dashboard</h1>
-                <p>Real-time multi-chain token monitoring</p>
+                <p>Real-time multi-chain token monitoring with intelligent analysis</p>
             </div>
             
             <div class="stats">
@@ -622,259 +821,354 @@ def get_basic_dashboard_html() -> str:
             }
             
             function handleWebSocketMessage(data) {
-                switch (data.type) {
-                    case 'new_opportunity':
-                        addOpportunityToList(data.data);
-                        break;
-                    case 'stats_update':
-                        updateStats(data.data);
-                        break;
+                try {
+                    switch (data.type) {
+                        case 'new_opportunity':
+                            addOpportunityToList(data.data);
+                            break;
+                        case 'stats_update':
+                            updateStats(data.data);
+                            break;
+                        default:
+                            console.log('Unknown message type:', data.type);
+                    }
+                } catch (error) {
+                    console.error('Error handling WebSocket message:', error);
                 }
             }
             
             function addOpportunityToList(opportunity) {
-                const list = document.getElementById('opportunity-list');
-                
-                // Add to opportunities array for details view
-                opportunities.unshift(opportunity);
-                if (opportunities.length > 50) {
-                    opportunities.pop();
-                }
-                
-                const item = document.createElement('div');
-                item.className = 'opportunity-item';
-                item.innerHTML = `
-                    <div class="opportunity-header">
-                        <span class="token-symbol">${opportunity.token_symbol}</span>
-                        <span class="risk-badge risk-${opportunity.risk_level}">${opportunity.risk_level}</span>
-                    </div>
-                    <div class="opportunity-details">
-                        <span class="chain-badge">${opportunity.chain}</span>
-                        Recommendation: <span class="recommendation rec-${opportunity.recommendation.toLowerCase().replace('_', '-')}">${opportunity.recommendation}</span><br>
-                        Confidence: ${opportunity.confidence} | Score: ${opportunity.score.toFixed(2)}<br>
-                        Liquidity: $${opportunity.liquidity_usd.toLocaleString()}<br>
-                        <small>Detected: ${new Date(opportunity.detected_at).toLocaleTimeString()}</small>
-                    </div>
-                    <div class="opportunity-actions">
-                        <button class="action-btn" onclick="executeTrade('${opportunity.token_symbol}')">Trade</button>
-                        <button class="action-btn details" onclick="showTokenDetails('${opportunity.token_address}')">Details</button>
-                    </div>
-                `;
-                
-                list.insertBefore(item, list.firstChild);
-                
-                // Keep only last 10 opportunities visible
-                while (list.children.length > 10) {
-                    list.removeChild(list.lastChild);
-                }
-                
-                // Update opportunity count
-                const totalEl = document.getElementById('total-opportunities');
-                totalEl.textContent = parseInt(totalEl.textContent) + 1;
-                
-                if (opportunity.confidence === 'HIGH') {
-                    const highConfEl = document.getElementById('high-confidence');
-                    highConfEl.textContent = parseInt(highConfEl.textContent) + 1;
+                try {
+                    const list = document.getElementById('opportunity-list');
+                    
+                    // Add to opportunities array for details view
+                    opportunities.unshift(opportunity);
+                    if (opportunities.length > 50) {
+                        opportunities.pop();
+                    }
+                    
+                    const item = document.createElement('div');
+                    item.className = 'opportunity-item';
+                    
+                    // Safe data extraction with fallbacks
+                    const tokenSymbol = opportunity.token_symbol || 'UNKNOWN';
+                    const chain = opportunity.chain || 'unknown';
+                    const riskLevel = opportunity.risk_level || 'unknown';
+                    const recommendation = opportunity.recommendation || 'UNKNOWN';
+                    const confidence = opportunity.confidence || 'UNKNOWN';
+                    const score = opportunity.score || 0;
+                    const liquidityUsd = opportunity.liquidity_usd || 0;
+                    const detectedAt = opportunity.detected_at ? new Date(opportunity.detected_at) : new Date();
+                    
+                    item.innerHTML = `
+                        <div class="opportunity-header">
+                            <span class="token-symbol">${tokenSymbol}</span>
+                            <span class="risk-badge risk-${riskLevel}">${riskLevel.toUpperCase()}</span>
+                        </div>
+                        <div class="opportunity-details">
+                            <span class="chain-badge">${chain.toUpperCase()}</span>
+                            Recommendation: <span class="recommendation rec-${recommendation.toLowerCase().replace('_', '-')}">${recommendation}</span><br>
+                            Confidence: ${confidence} | Score: ${score.toFixed(2)}<br>
+                            Liquidity: $${liquidityUsd.toLocaleString()}<br>
+                            <small>Detected: ${detectedAt.toLocaleTimeString()}</small>
+                        </div>
+                        <div class="opportunity-actions">
+                            <button class="action-btn" onclick="executeTrade('${tokenSymbol}')">Trade</button>
+                            <button class="action-btn details" onclick="showTokenDetails('${opportunity.token_address}')">Details</button>
+                        </div>
+                    `;
+                    
+                    list.insertBefore(item, list.firstChild);
+                    
+                    // Keep only last 10 opportunities visible
+                    while (list.children.length > 10) {
+                        list.removeChild(list.lastChild);
+                    }
+                    
+                    // Update opportunity count
+                    const totalEl = document.getElementById('total-opportunities');
+                    totalEl.textContent = parseInt(totalEl.textContent) + 1;
+                    
+                    if (confidence === 'HIGH') {
+                        const highConfEl = document.getElementById('high-confidence');
+                        highConfEl.textContent = parseInt(highConfEl.textContent) + 1;
+                    }
+                    
+                } catch (error) {
+                    console.error('Error adding opportunity to list:', error);
                 }
             }
             
             function showTokenDetails(tokenAddress) {
-                const opportunity = opportunities.find(opp => opp.token_address === tokenAddress);
-                if (!opportunity) {
-                    alert('Opportunity details not found');
-                    return;
+                try {
+                    const opportunity = opportunities.find(opp => opp.token_address === tokenAddress);
+                    if (!opportunity) {
+                        showNotification('Opportunity details not found', 'error');
+                        return;
+                    }
+                    
+                    // Update modal title
+                    document.getElementById('modal-title').textContent = `${opportunity.token_symbol} - Detailed Analysis`;
+                    
+                    // Build modal content with safe data access
+                    const modalBody = document.getElementById('modal-body');
+                    const reasons = opportunity.reasons || [];
+                    const warnings = opportunity.warnings || [];
+                    
+                    modalBody.innerHTML = `
+                        <div class="detail-section">
+                            <h3>Token Information</h3>
+                            <div class="detail-grid">
+                                <div class="detail-item">
+                                    <label>Symbol:</label>
+                                    <span>${opportunity.token_symbol || 'UNKNOWN'}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Address:</label>
+                                    <span class="address-text">${opportunity.token_address || 'unknown'}</span>
+                                    <button class="copy-btn" onclick="copyToClipboard('${opportunity.token_address}')">Copy</button>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Chain:</label>
+                                    <span class="chain-badge">${opportunity.chain || 'unknown'}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Detected:</label>
+                                    <span>${new Date(opportunity.detected_at).toLocaleString()}</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="detail-section">
+                            <h3>Risk Analysis</h3>
+                            <div class="detail-grid">
+                                <div class="detail-item">
+                                    <label>Risk Level:</label>
+                                    <span class="risk-badge risk-${opportunity.risk_level}">${(opportunity.risk_level || 'unknown').toUpperCase()}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Confidence Score:</label>
+                                    <span>${(opportunity.score || 0).toFixed(3)}/1.0</span>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Recommendation:</label>
+                                    <span class="recommendation rec-${(opportunity.recommendation || 'unknown').toLowerCase().replace('_', '-')}">${opportunity.recommendation || 'UNKNOWN'}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Confidence:</label>
+                                    <span>${opportunity.confidence || 'UNKNOWN'}</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="detail-section">
+                            <h3>Liquidity Information</h3>
+                            <div class="detail-grid">
+                                <div class="detail-item">
+                                    <label>DEX:</label>
+                                    <span>${opportunity.dex_name || 'Unknown'}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <label>Liquidity USD:</label>
+                                    <span>$${(opportunity.liquidity_usd || 0).toLocaleString()}</span>
+                                </div>
+                                ${opportunity.pair_address && opportunity.pair_address !== 'unknown' ? `
+                                <div class="detail-item">
+                                    <label>Pair Address:</label>
+                                    <span class="address-text">${opportunity.pair_address}</span>
+                                    <button class="copy-btn" onclick="copyToClipboard('${opportunity.pair_address}')">Copy</button>
+                                </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                        
+                        ${reasons.length > 0 ? `
+                        <div class="detail-section">
+                            <h3>Analysis Reasons</h3>
+                            <ul style="margin-left: 20px; line-height: 1.6; color: #4CAF50;">
+                                ${reasons.map(reason => `<li>${reason}</li>`).join('')}
+                            </ul>
+                        </div>
+                        ` : ''}
+                        
+                        ${warnings.length > 0 ? `
+                        <div class="detail-section">
+                            <h3>Risk Warnings</h3>
+                            <ul style="margin-left: 20px; line-height: 1.6; color: #f44336;">
+                                ${warnings.map(warning => `<li>${warning}</li>`).join('')}
+                            </ul>
+                        </div>
+                        ` : ''}
+                        
+                        <div class="detail-section">
+                            <h3>External Links</h3>
+                            <div class="external-links">
+                                ${getExternalLinks(opportunity)}
+                            </div>
+                        </div>
+                    `;
+                    
+                    // Show modal
+                    document.getElementById('details-modal').classList.add('show');
+                    
+                } catch (error) {
+                    console.error('Error showing token details:', error);
+                    showNotification('Error loading token details', 'error');
                 }
-                
-                // Update modal title
-                document.getElementById('modal-title').textContent = `${opportunity.token_symbol} - Detailed Analysis`;
-                
-                // Build modal content
-                const modalBody = document.getElementById('modal-body');
-                modalBody.innerHTML = `
-                    <div class="detail-section">
-                        <h3>Token Information</h3>
-                        <div class="detail-grid">
-                            <div class="detail-item">
-                                <label>Symbol:</label>
-                                <span>${opportunity.token_symbol}</span>
-                            </div>
-                            <div class="detail-item">
-                                <label>Address:</label>
-                                <span class="address-text">${opportunity.token_address}</span>
-                                <button class="copy-btn" onclick="copyToClipboard('${opportunity.token_address}')">Copy</button>
-                            </div>
-                            <div class="detail-item">
-                                <label>Chain:</label>
-                                <span class="chain-badge">${opportunity.chain}</span>
-                            </div>
-                            <div class="detail-item">
-                                <label>Detected:</label>
-                                <span>${new Date(opportunity.detected_at).toLocaleString()}</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="detail-section">
-                        <h3>Risk Analysis</h3>
-                        <div class="detail-grid">
-                            <div class="detail-item">
-                                <label>Risk Level:</label>
-                                <span class="risk-badge risk-${opportunity.risk_level}">${opportunity.risk_level.toUpperCase()}</span>
-                            </div>
-                            <div class="detail-item">
-                                <label>Confidence Score:</label>
-                                <span>${opportunity.score.toFixed(3)}/1.0</span>
-                            </div>
-                            <div class="detail-item">
-                                <label>Recommendation:</label>
-                                <span class="recommendation rec-${opportunity.recommendation.toLowerCase().replace('_', '-')}">${opportunity.recommendation}</span>
-                            </div>
-                            <div class="detail-item">
-                                <label>Confidence:</label>
-                                <span>${opportunity.confidence}</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="detail-section">
-                        <h3>Liquidity Information</h3>
-                        <div class="detail-grid">
-                            <div class="detail-item">
-                                <label>DEX:</label>
-                                <span>${opportunity.dex_name || 'Unknown'}</span>
-                            </div>
-                            <div class="detail-item">
-                                <label>Liquidity USD:</label>
-                                <span>$${opportunity.liquidity_usd.toLocaleString()}</span>
-                            </div>
-                            ${opportunity.pair_address ? `
-                            <div class="detail-item">
-                                <label>Pair Address:</label>
-                                <span class="address-text">${opportunity.pair_address}</span>
-                                <button class="copy-btn" onclick="copyToClipboard('${opportunity.pair_address}')">Copy</button>
-                            </div>
-                            ` : ''}
-                        </div>
-                    </div>
-                    
-                    ${opportunity.reasons && opportunity.reasons.length > 0 ? `
-                    <div class="detail-section">
-                        <h3>Analysis Reasons</h3>
-                        <ul style="margin-left: 20px; line-height: 1.6;">
-                            ${opportunity.reasons.map(reason => `<li>${reason}</li>`).join('')}
-                        </ul>
-                    </div>
-                    ` : ''}
-                    
-                    ${opportunity.warnings && opportunity.warnings.length > 0 ? `
-                    <div class="detail-section">
-                        <h3>Risk Warnings</h3>
-                        <ul style="margin-left: 20px; line-height: 1.6; color: #f44336;">
-                            ${opportunity.warnings.map(warning => `<li>${warning}</li>`).join('')}
-                        </ul>
-                    </div>
-                    ` : ''}
-                    
-                    <div class="detail-section">
-                        <h3>External Links</h3>
-                        <div class="external-links">
-                            ${getExternalLinks(opportunity)}
-                        </div>
-                    </div>
-                `;
-                
-                // Show modal
-                document.getElementById('details-modal').classList.add('show');
             }
             
             function getExternalLinks(opportunity) {
-                const links = [];
-                const address = opportunity.token_address;
-                const chain = opportunity.chain.toLowerCase();
-                
-                if (chain.includes('ethereum')) {
-                    links.push(`<a href="https://etherscan.io/token/${address}" target="_blank" class="external-link">Etherscan</a>`);
-                    links.push(`<a href="https://dexscreener.com/ethereum/${address}" target="_blank" class="external-link">DexScreener</a>`);
-                } else if (chain.includes('base')) {
-                    links.push(`<a href="https://basescan.org/token/${address}" target="_blank" class="external-link">BaseScan</a>`);
-                    links.push(`<a href="https://dexscreener.com/base/${address}" target="_blank" class="external-link">DexScreener</a>`);
-                } else if (chain.includes('solana')) {
-                    links.push(`<a href="https://solscan.io/token/${address}" target="_blank" class="external-link">Solscan</a>`);
-                    links.push(`<a href="https://dexscreener.com/solana/${address}" target="_blank" class="external-link">DexScreener</a>`);
+                try {
+                    const links = [];
+                    const address = opportunity.token_address || '';
+                    const chain = (opportunity.chain || '').toLowerCase();
+                    
+                    if (chain.includes('ethereum')) {
+                        links.push(`<a href="https://etherscan.io/token/${address}" target="_blank" class="external-link">Etherscan</a>`);
+                        links.push(`<a href="https://dexscreener.com/ethereum/${address}" target="_blank" class="external-link">DexScreener</a>`);
+                    } else if (chain.includes('base')) {
+                        links.push(`<a href="https://basescan.org/token/${address}" target="_blank" class="external-link">BaseScan</a>`);
+                        links.push(`<a href="https://dexscreener.com/base/${address}" target="_blank" class="external-link">DexScreener</a>`);
+                    } else if (chain.includes('solana')) {
+                        links.push(`<a href="https://solscan.io/token/${address}" target="_blank" class="external-link">Solscan</a>`);
+                        links.push(`<a href="https://dexscreener.com/solana/${address}" target="_blank" class="external-link">DexScreener</a>`);
+                    }
+                    
+                    const symbol = opportunity.token_symbol || '';
+                    if (symbol) {
+                        links.push(`<a href="https://www.coingecko.com/en/search_redirect?id=${symbol}" target="_blank" class="external-link">CoinGecko</a>`);
+                    }
+                    
+                    return links.join('');
+                } catch (error) {
+                    console.error('Error generating external links:', error);
+                    return '<span>External links unavailable</span>';
                 }
-                
-                links.push(`<a href="https://www.coingecko.com/en/search_redirect?id=${opportunity.token_symbol}" target="_blank" class="external-link">CoinGecko</a>`);
-                
-                return links.join('');
             }
             
             function closeDetailsModal() {
-                document.getElementById('details-modal').classList.remove('show');
+                try {
+                    document.getElementById('details-modal').classList.remove('show');
+                } catch (error) {
+                    console.error('Error closing modal:', error);
+                }
             }
             
             function copyToClipboard(text) {
-                if (navigator.clipboard) {
-                    navigator.clipboard.writeText(text).then(() => {
-                        showNotification('Copied to clipboard!');
-                    });
-                } else {
-                    // Fallback for older browsers
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(text).then(() => {
+                            showNotification('Copied to clipboard!', 'success');
+                        }).catch((error) => {
+                            console.error('Clipboard API failed:', error);
+                            fallbackCopyToClipboard(text);
+                        });
+                    } else {
+                        fallbackCopyToClipboard(text);
+                    }
+                } catch (error) {
+                    console.error('Copy to clipboard error:', error);
+                    showNotification('Copy failed', 'error');
+                }
+            }
+            
+            function fallbackCopyToClipboard(text) {
+                try {
                     const textArea = document.createElement('textarea');
                     textArea.value = text;
                     document.body.appendChild(textArea);
                     textArea.select();
-                    document.execCommand('copy');
+                    const success = document.execCommand('copy');
                     document.body.removeChild(textArea);
-                    showNotification('Copied to clipboard!');
+                    
+                    if (success) {
+                        showNotification('Copied to clipboard!', 'success');
+                    } else {
+                        showNotification('Copy failed', 'error');
+                    }
+                } catch (error) {
+                    console.error('Fallback copy failed:', error);
+                    showNotification('Copy not supported', 'error');
                 }
             }
             
-            function showNotification(message) {
-                const notification = document.createElement('div');
-                notification.style.cssText = `
-                    position: fixed;
-                    top: 20px;
-                    right: 20px;
-                    background: #4CAF50;
-                    color: white;
-                    padding: 10px 20px;
-                    border-radius: 5px;
-                    z-index: 1001;
-                    animation: slideInRight 0.3s ease;
-                `;
-                notification.textContent = message;
-                document.body.appendChild(notification);
-                
-                setTimeout(() => {
-                    notification.remove();
-                }, 3000);
+            function showNotification(message, type = 'info') {
+                try {
+                    const notification = document.createElement('div');
+                    const bgColor = type === 'success' ? '#4CAF50' : type === 'error' ? '#f44336' : '#2196F3';
+                    
+                    notification.style.cssText = `
+                        position: fixed;
+                        top: 20px;
+                        right: 20px;
+                        background: ${bgColor};
+                        color: white;
+                        padding: 10px 20px;
+                        border-radius: 5px;
+                        z-index: 1001;
+                        animation: slideInRight 0.3s ease;
+                        max-width: 300px;
+                        word-wrap: break-word;
+                    `;
+                    notification.textContent = message;
+                    document.body.appendChild(notification);
+                    
+                    setTimeout(() => {
+                        if (notification.parentNode) {
+                            notification.remove();
+                        }
+                    }, 3000);
+                } catch (error) {
+                    console.error('Error showing notification:', error);
+                }
             }
             
             function executeTrade(tokenSymbol) {
-                showNotification(`Trade execution for ${tokenSymbol} - Feature coming soon!`);
+                try {
+                    showNotification(`Trade execution for ${tokenSymbol} - Feature coming soon!`, 'info');
+                } catch (error) {
+                    console.error('Error in executeTrade:', error);
+                }
             }
             
             function updateStats(stats) {
-                if (stats.analysis_rate !== undefined) {
-                    document.getElementById('analysis-rate').textContent = stats.analysis_rate;
+                try {
+                    if (stats.analysis_rate !== undefined) {
+                        const rateEl = document.getElementById('analysis-rate');
+                        if (rateEl) {
+                            rateEl.textContent = stats.analysis_rate;
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error updating stats:', error);
                 }
             }
             
             function updateConnectionStatus(connected) {
-                const statusEl = document.getElementById('connection-status');
-                if (connected) {
-                    statusEl.textContent = 'Connected';
-                    statusEl.className = 'connection-status connected';
-                } else {
-                    statusEl.textContent = 'Disconnected';
-                    statusEl.className = 'connection-status disconnected';
+                try {
+                    const statusEl = document.getElementById('connection-status');
+                    if (statusEl) {
+                        if (connected) {
+                            statusEl.textContent = 'Connected';
+                            statusEl.className = 'connection-status connected';
+                        } else {
+                            statusEl.textContent = 'Disconnected';
+                            statusEl.className = 'connection-status disconnected';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error updating connection status:', error);
                 }
             }
             
             // Close modal when clicking outside
             document.getElementById('details-modal').addEventListener('click', function(e) {
-                if (e.target === this) {
-                    closeDetailsModal();
+                try {
+                    if (e.target === this) {
+                        closeDetailsModal();
+                    }
+                } catch (error) {
+                    console.error('Error in modal click handler:', error);
                 }
             });
             
@@ -895,31 +1189,29 @@ def get_basic_dashboard_html() -> str:
             }
             
             // Initialize
-            connectWebSocket();
-            fetchStats();
-            setInterval(fetchStats, 10000); // Update stats every 10 seconds
+            try {
+                connectWebSocket();
+                fetchStats();
+                setInterval(fetchStats, 10000); // Update stats every 10 seconds
+            } catch (error) {
+                console.error('Error during initialization:', error);
+            }
         </script>
     </body>
     </html>
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @app.get("/api/stats")
 async def get_stats():
-    """Get system statistics."""
+    """
+    Get system statistics with comprehensive error handling.
+    
+    Returns:
+        Dict: System statistics or error information
+        
+    Raises:
+        HTTPException: If stats cannot be retrieved
+    """
     try:
         uptime = datetime.now() - dashboard_server.stats["uptime_start"]
         portfolio = dashboard_server.get_safe_portfolio_summary()
@@ -935,46 +1227,73 @@ async def get_stats():
         }
     except Exception as e:
         logger.error(f"Stats error: {e}")
-        return {"error": str(e), "connected_clients": len(dashboard_server.connected_clients)}
+        # Return partial data instead of failing completely
+        return {
+            "error": str(e), 
+            "connected_clients": len(dashboard_server.connected_clients) if dashboard_server.connected_clients else 0,
+            "total_opportunities": dashboard_server.stats.get("total_opportunities", 0),
+            "status": "error"
+        }
 
 @app.get("/api/opportunities")
 async def get_opportunities():
-    """Get recent opportunities."""
+    """
+    Get recent opportunities with error handling.
+    
+    Returns:
+        List[Dict]: Recent opportunities or empty list on error
+        
+    Raises:
+        HTTPException: If opportunities cannot be retrieved
+    """
     try:
-        return dashboard_server.opportunities[-20:]  # Last 20
+        # Return last 20 opportunities safely
+        opportunities = dashboard_server.opportunities[-20:] if dashboard_server.opportunities else []
+        return opportunities
     except Exception as e:
         logger.error(f"Opportunities error: {e}")
         return []
-    
-
 
 @app.get("/api/trades")
 async def get_trade_history():
-    """Get recent trade history."""
+    """
+    Get recent trade history with comprehensive error handling.
+    
+    Returns:
+        Dict: Trade history or error information
+        
+    Raises:
+        HTTPException: If trades cannot be retrieved
+    """
     try:
         trades = []
         
         # Try to get trades from position manager
-        if dashboard_server.position_manager and hasattr(dashboard_server.position_manager, 'closed_positions'):
-            for exit in dashboard_server.position_manager.closed_positions[-20:]:  # Last 20
-                try:
-                    trades.append({
-                        "id": getattr(exit, 'position_id', 'unknown'),
-                        "token_symbol": getattr(exit, 'position_id', 'UNKNOWN').split('_')[0],
-                        "trade_type": "close",
-                        "amount": float(getattr(exit, 'exit_amount', 0)),
-                        "status": "completed",
-                        "created_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
-                        "executed_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
-                        "tx_hash": getattr(exit, 'exit_tx_hash', None),
-                        "chain": "unknown",
-                        "pnl": float(getattr(exit, 'realized_pnl', 0))
-                    })
-                except Exception as trade_error:
-                    logger.error(f"Error processing trade: {trade_error}")
-                    continue
+        if (dashboard_server.position_manager and 
+            hasattr(dashboard_server.position_manager, 'closed_positions')):
+            
+            try:
+                for exit in dashboard_server.position_manager.closed_positions[-20:]:  # Last 20
+                    try:
+                        trades.append({
+                            "id": getattr(exit, 'position_id', 'unknown'),
+                            "token_symbol": getattr(exit, 'position_id', 'UNKNOWN').split('_')[0],
+                            "trade_type": "close",
+                            "amount": float(getattr(exit, 'exit_amount', 0)),
+                            "status": "completed",
+                            "created_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                            "executed_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                            "tx_hash": getattr(exit, 'exit_tx_hash', None),
+                            "chain": "unknown",
+                            "pnl": float(getattr(exit, 'realized_pnl', 0))
+                        })
+                    except Exception as trade_error:
+                        logger.error(f"Error processing individual trade: {trade_error}")
+                        continue
+            except Exception as position_error:
+                logger.error(f"Error accessing position manager data: {position_error}")
         
-        # If no trades from position manager, return empty with success
+        # Return trades with success status
         return {"trades": trades, "status": "success"}
         
     except Exception as e:
@@ -983,24 +1302,37 @@ async def get_trade_history():
 
 @app.get("/api/positions")
 async def get_positions():
-    """Get current trading positions."""
+    """
+    Get current trading positions with comprehensive error handling.
+    
+    Returns:
+        Dict: Current positions or error information
+        
+    Raises:
+        HTTPException: If positions cannot be retrieved
+    """
     try:
         positions = []
         
-        if dashboard_server.position_manager and hasattr(dashboard_server.position_manager, 'active_positions'):
-            for position_id, position in dashboard_server.position_manager.active_positions.items():
-                try:
-                    positions.append({
-                        "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
-                        "amount": float(getattr(position, 'entry_amount', 0)),
-                        "entry_price": float(getattr(position, 'entry_price', 0)),
-                        "current_price": float(getattr(position, 'current_price', 0)),
-                        "pnl": float(getattr(position, 'unrealized_pnl', 0)),
-                        "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
-                    })
-                except Exception as pos_error:
-                    logger.error(f"Error processing position {position_id}: {pos_error}")
-                    continue
+        if (dashboard_server.position_manager and 
+            hasattr(dashboard_server.position_manager, 'active_positions')):
+            
+            try:
+                for position_id, position in dashboard_server.position_manager.active_positions.items():
+                    try:
+                        positions.append({
+                            "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
+                            "amount": float(getattr(position, 'entry_amount', 0)),
+                            "entry_price": float(getattr(position, 'entry_price', 0)),
+                            "current_price": float(getattr(position, 'current_price', 0)),
+                            "pnl": float(getattr(position, 'unrealized_pnl', 0)),
+                            "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
+                        })
+                    except Exception as pos_error:
+                        logger.error(f"Error processing position {position_id}: {pos_error}")
+                        continue
+            except Exception as positions_error:
+                logger.error(f"Error accessing active positions: {positions_error}")
         
         return {"positions": positions, "status": "success"}
         
@@ -1008,35 +1340,89 @@ async def get_positions():
         logger.error(f"Error getting positions: {e}")
         return {"positions": [], "error": str(e), "status": "error"}
 
-
-
-
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates."""
+    """
+    WebSocket endpoint for real-time updates with improved disconnect handling.
+    
+    Args:
+        websocket (WebSocket): WebSocket connection
+        
+    Returns:
+        None
+        
+    Raises:
+        WebSocketDisconnect: When client disconnects
+    """
     await websocket.accept()
     dashboard_server.connected_clients.append(websocket)
     logger.info(f"WebSocket client connected. Total: {len(dashboard_server.connected_clients)}")
     
     try:
+        # Send initial connection confirmation
+        await websocket.send_text(json.dumps({
+            "type": "connected",
+            "message": "WebSocket connection established"
+        }))
+        
         while True:
-            # Keep connection alive
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if message.get("type") == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
+            try:
+                # Use receive_json with timeout to handle disconnects gracefully
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+                
+                # Handle different message types
+                if message.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                elif message.get("type") == "subscribe":
+                    await websocket.send_text(json.dumps({
+                        "type": "subscribed",
+                        "message": "Successfully subscribed to updates"
+                    }))
+                else:
+                    logger.debug(f"Unknown WebSocket message type: {message.get('type')}")
+                    
+            except asyncio.TimeoutError:
+                # Send ping to keep connection alive
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    # If we can't send ping, connection is dead
+                    break
+                    
+            except json.JSONDecodeError as json_error:
+                logger.warning(f"Invalid JSON from WebSocket client: {json_error}")
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Invalid JSON format"
+                    }))
+                except Exception:
+                    # If we can't send error message, connection is dead
+                    break
+                    
+            except Exception as message_error:
+                # Check if this is a disconnect-related error
+                error_msg = str(message_error).lower()
+                if any(keyword in error_msg for keyword in ['disconnect', 'closed', 'connection']):
+                    logger.debug(f"WebSocket connection closed: {message_error}")
+                    break
+                else:
+                    logger.error(f"WebSocket message processing error: {message_error}")
+                    # Continue the loop for non-disconnect errors
                 
     except WebSocketDisconnect:
-        if websocket in dashboard_server.connected_clients:
-            dashboard_server.connected_clients.remove(websocket)
-        logger.info(f"WebSocket client disconnected. Remaining: {len(dashboard_server.connected_clients)}")
+        logger.info("WebSocket client disconnected normally")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+    finally:
+        # Always clean up the client connection
         if websocket in dashboard_server.connected_clients:
             dashboard_server.connected_clients.remove(websocket)
+        logger.info(f"WebSocket cleanup complete. Remaining clients: {len(dashboard_server.connected_clients)}")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}")
+        raise
