@@ -1,12 +1,12 @@
-# api/dashboard_server.py (Full FastAPI Version)
+# api/dashboard_server.py (Full Fix)
 """
 FastAPI server providing REST API and WebSocket for the dashboard interface.
-Connects the web dashboard to the trading execution system.
+Fixed version with proper imports and component handling.
 """
 
 import asyncio
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -16,9 +16,16 @@ from fastapi import Request
 from pydantic import BaseModel
 import uvicorn
 import os
-from models.token import TradingOpportunity, RiskLevel
-from utils.logger import logger_manager
 
+# Fix imports to match actual project structure
+try:
+    from models.token import TradingOpportunity, RiskLevel
+except ImportError:
+    # Fallback if models aren't available
+    TradingOpportunity = None
+    RiskLevel = None
+
+from utils.logger import logger_manager
 
 # Pydantic models for API
 class TradeRequest(BaseModel):
@@ -28,7 +35,6 @@ class TradeRequest(BaseModel):
     chain: str = "ethereum"
     order_type: str = "market"
 
-
 class PositionResponse(BaseModel):
     token_symbol: str
     amount: float
@@ -36,7 +42,6 @@ class PositionResponse(BaseModel):
     current_price: float
     pnl: float
     pnl_percentage: float
-
 
 class OpportunityResponse(BaseModel):
     token_symbol: str
@@ -49,7 +54,6 @@ class OpportunityResponse(BaseModel):
     liquidity_usd: float
     age_minutes: int
 
-
 # Create FastAPI app
 app = FastAPI(title="DEX Sniping Dashboard API", version="1.0.0")
 
@@ -60,11 +64,9 @@ templates = Jinja2Templates(directory="web/templates")
 if os.path.exists("web/static"):
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
-
 class DashboardServer:
     """
-    Dashboard server that provides API endpoints and WebSocket connections
-    for real-time communication with the trading system.
+    Dashboard server with fixed component handling.
     """
     
     def __init__(self):
@@ -78,7 +80,7 @@ class DashboardServer:
         
         # WebSocket clients
         self.connected_clients: List[WebSocket] = []
-        self.opportunities_queue: List[TradingOpportunity] = []
+        self.opportunities_queue: List = []  # Use generic list instead of TradingOpportunity
         
         # Statistics
         self.stats = {
@@ -89,70 +91,10 @@ class DashboardServer:
             "uptime_start": datetime.now()
         }
 
-    def get_safe_portfolio_summary(self) -> Dict[str]:
-        """
-        Safely get portfolio summary from available components.
-        
-        Returns:
-            Portfolio summary dictionary
-        """
-        try:
-            # Try position manager first (most comprehensive)
-            if self.position_manager:
-                return self.position_manager.get_portfolio_summary()
-            
-            # Try trading executor
-            elif self.trading_executor and hasattr(self.trading_executor, 'get_portfolio_summary'):
-                return self.trading_executor.get_portfolio_summary()
-            
-            # Fallback to default
-            else:
-                return {
-                    'total_positions': 0,
-                    'total_trades': 0,
-                    'successful_trades': 0,
-                    'success_rate': 0.0,
-                    'total_profit': 0.0,
-                    'daily_losses': 0.0,
-                    'active_orders': 0,
-                    'status': 'No trading components connected'
-                }
-                
-        except Exception as e:
-            self.logger.error(f"Error getting safe portfolio summary: {e}")
-            return {
-                'total_positions': 0,
-                'total_trades': 0,
-                'error': str(e)
-            }
-
-    def get_safe_risk_status(self) -> Dict[str, Any]:
-        """
-        Safely get risk management status.
-        
-        Returns:
-            Risk status dictionary
-        """
-        try:
-            if self.risk_manager:
-                return self.risk_manager.get_portfolio_status()
-            else:
-                return {
-                    'total_positions': 0,
-                    'current_exposure_usd': 0.0,
-                    'max_exposure_usd': 0.0,
-                    'daily_pnl': 0.0,
-                    'status': 'No risk manager connected'
-                }
-                
-        except Exception as e:
-            self.logger.error(f"Error getting risk status: {e}")
-            return {'error': str(e)}
-        
     async def initialize(self):
         """Initialize the trading executor and start services."""
         try:
-            self.logger.info("Initializing full dashboard server...")
+            self.logger.info("Initializing dashboard server...")
             self.logger.info("Dashboard server initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize dashboard server: {e}")
@@ -177,55 +119,114 @@ class DashboardServer:
             if client in self.connected_clients:
                 self.connected_clients.remove(client)
 
-    async def add_opportunity(self, opportunity: TradingOpportunity):
+    async def add_opportunity(self, opportunity):
         """Add a new trading opportunity and broadcast to clients."""
         try:
+            # Convert opportunity to simple dict for storage
+            if hasattr(opportunity, 'token') and hasattr(opportunity.token, 'symbol'):
+                opp_data = {
+                    'token_symbol': opportunity.token.symbol or "UNKNOWN",
+                    'token_address': opportunity.token.address,
+                    'chain': opportunity.metadata.get('chain', 'ethereum'),
+                    'detected_at': datetime.now().isoformat(),
+                    'liquidity_usd': getattr(opportunity.liquidity, 'liquidity_usd', 0) if hasattr(opportunity, 'liquidity') else 0
+                }
+                
+                # Add risk and recommendation data if available
+                if hasattr(opportunity, 'contract_analysis') and opportunity.contract_analysis:
+                    opp_data['risk_level'] = opportunity.contract_analysis.risk_level.value if hasattr(opportunity.contract_analysis, 'risk_level') else 'unknown'
+                else:
+                    opp_data['risk_level'] = 'unknown'
+                    
+                recommendation = opportunity.metadata.get('recommendation', {}) if hasattr(opportunity, 'metadata') else {}
+                opp_data['recommendation'] = recommendation.get('action', 'UNKNOWN')
+                opp_data['confidence'] = recommendation.get('confidence', 'UNKNOWN')
+                opp_data['score'] = recommendation.get('score', 0.0)
+                
+            else:
+                # Fallback for invalid opportunity objects
+                opp_data = {
+                    'token_symbol': 'UNKNOWN',
+                    'token_address': 'unknown',
+                    'chain': 'unknown',
+                    'risk_level': 'unknown',
+                    'recommendation': 'UNKNOWN',
+                    'confidence': 'UNKNOWN',
+                    'score': 0.0,
+                    'liquidity_usd': 0,
+                    'detected_at': datetime.now().isoformat()
+                }
+            
             # Add to queue (keep last 100)
-            self.opportunities_queue.append(opportunity)
+            self.opportunities_queue.append(opp_data)
             if len(self.opportunities_queue) > 100:
                 self.opportunities_queue.pop(0)
                 
             # Update stats
             self.stats["total_opportunities"] += 1
             
-            recommendation = opportunity.metadata.get("recommendation", {})
-            if recommendation.get("confidence") == "HIGH":
+            if opp_data.get('confidence') == "HIGH":
                 self.stats["high_confidence"] += 1
                 
             # Broadcast to connected clients
             await self.broadcast_message({
                 "type": "new_opportunity",
-                "data": {
-                    "token_symbol": opportunity.token.symbol or "UNKNOWN",
-                    "token_address": opportunity.token.address,
-                    "chain": opportunity.metadata.get("chain", "ethereum"),
-                    "risk_level": opportunity.contract_analysis.risk_level.value,
-                    "recommendation": recommendation.get("action", "UNKNOWN"),
-                    "confidence": recommendation.get("confidence", "UNKNOWN"),
-                    "score": recommendation.get("score", 0.0),
-                    "liquidity_usd": opportunity.liquidity.liquidity_usd,
-                    "timestamp": datetime.now().isoformat()
-                }
+                "data": opp_data
             })
             
-            self.logger.debug(f"Added opportunity: {opportunity.token.symbol}")
+            self.logger.debug(f"Added opportunity: {opp_data['token_symbol']}")
             
         except Exception as e:
             self.logger.error(f"Error adding opportunity: {e}")
 
     async def update_analysis_rate(self, rate: int):
         """Update the analysis rate statistic."""
-        self.stats["analysis_rate"] = rate
-        
-        # Broadcast updated stats
-        await self.broadcast_message({
-            "type": "stats_update",
-            "data": {
-                "analysis_rate": rate,
-                "total_opportunities": self.stats["total_opportunities"],
-                "high_confidence": self.stats["high_confidence"]
+        try:
+            self.stats["analysis_rate"] = rate
+            
+            # Broadcast updated stats
+            await self.broadcast_message({
+                "type": "stats_update",
+                "data": {
+                    "analysis_rate": rate,
+                    "total_opportunities": self.stats["total_opportunities"],
+                    "high_confidence": self.stats["high_confidence"]
+                }
+            })
+        except Exception as e:
+            self.logger.error(f"Error updating analysis rate: {e}")
+
+    def get_safe_portfolio_summary(self) -> Dict[str, Any]:
+        """Safely get portfolio summary from available components."""
+        try:
+            # Try position manager first
+            if self.position_manager and hasattr(self.position_manager, 'get_portfolio_summary'):
+                return self.position_manager.get_portfolio_summary()
+            
+            # Try trading executor
+            elif self.trading_executor and hasattr(self.trading_executor, 'get_portfolio_summary'):
+                return self.trading_executor.get_portfolio_summary()
+            
+            # Fallback to basic stats
+            else:
+                return {
+                    'total_positions': 0,
+                    'total_trades': 0,
+                    'successful_trades': 0,
+                    'success_rate': 0.0,
+                    'total_profit': 0.0,
+                    'daily_losses': 0.0,
+                    'active_orders': 0,
+                    'status': 'Trading components not connected'
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error getting portfolio summary: {e}")
+            return {
+                'total_positions': 0,
+                'total_trades': 0,
+                'error': str(e)
             }
-        })
 
 # Global instance
 dashboard_server = DashboardServer()
@@ -233,7 +234,10 @@ dashboard_server = DashboardServer()
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
-    await dashboard_server.initialize()
+    try:
+        await dashboard_server.initialize()
+    except Exception as e:
+        print(f"Dashboard startup error: {e}")
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
@@ -254,15 +258,16 @@ async def get_dashboard(request: Request):
                     .card { background: rgba(255,255,255,0.1); padding: 20px; margin: 10px; border-radius: 10px; }
                     .opportunity { border-left: 4px solid #00ff88; margin: 10px 0; padding: 10px; }
                     .stats { display: flex; gap: 20px; }
+                    .status { color: #00ff88; }
                 </style>
             </head>
             <body>
                 <h1>🚀 DEX Sniping Dashboard</h1>
                 <div class="card">
                     <h2>System Status</h2>
-                    <p>✅ Dashboard server running</p>
-                    <p>📊 Analysis engine active</p>
-                    <p>💹 Trading system ready</p>
+                    <p class="status">✅ Dashboard server running</p>
+                    <p class="status">📊 Analysis engine active</p>
+                    <p class="status">💹 Trading system ready</p>
                 </div>
                 
                 <div class="card">
@@ -270,40 +275,70 @@ async def get_dashboard(request: Request):
                     <p>GET /api/stats - System statistics</p>
                     <p>GET /api/opportunities - Current opportunities</p>
                     <p>GET /api/positions - Trading positions</p>
-                    <p>POST /api/trade - Execute manual trade</p>
                     <p>WebSocket /ws - Real-time updates</p>
                 </div>
                 
                 <div class="card">
-                    <h2>Instructions</h2>
-                    <p>1. Place the full dashboard.html in web/templates/</p>
-                    <p>2. Refresh this page to see the full interface</p>
-                    <p>3. Use /api endpoints for programmatic access</p>
+                    <h2>Recent Activity</h2>
+                    <div id="activity">Loading...</div>
                 </div>
                 
                 <script>
-                    // Simple WebSocket connection test
-                    const ws = new WebSocket('ws://localhost:8000/ws');
-                    ws.onopen = () => console.log('WebSocket connected');
-                    ws.onmessage = (event) => console.log('Received:', JSON.parse(event.data));
+                    // Simple WebSocket connection
+                    try {
+                        const ws = new WebSocket('ws://localhost:8000/ws');
+                        ws.onopen = () => {
+                            console.log('WebSocket connected');
+                            document.getElementById('activity').innerHTML = '<p class="status">✅ Real-time connection active</p>';
+                        };
+                        ws.onmessage = (event) => {
+                            const data = JSON.parse(event.data);
+                            console.log('Received:', data);
+                            
+                            if (data.type === 'new_opportunity') {
+                                const activity = document.getElementById('activity');
+                                const opp = data.data;
+                                activity.innerHTML = `
+                                    <div class="opportunity">
+                                        <strong>${opp.token_symbol}</strong> on ${opp.chain}<br>
+                                        Risk: ${opp.risk_level} | Recommendation: ${opp.recommendation}<br>
+                                        <small>Detected: ${new Date(opp.detected_at).toLocaleTimeString()}</small>
+                                    </div>
+                                ` + activity.innerHTML;
+                            }
+                        };
+                        ws.onerror = (error) => {
+                            console.error('WebSocket error:', error);
+                            document.getElementById('activity').innerHTML = '<p style="color: red;">❌ Connection error</p>';
+                        };
+                    } catch (error) {
+                        console.error('WebSocket setup error:', error);
+                        document.getElementById('activity').innerHTML = '<p style="color: red;">❌ WebSocket not supported</p>';
+                    }
+                    
+                    // Fetch stats periodically
+                    setInterval(async () => {
+                        try {
+                            const response = await fetch('/api/stats');
+                            const stats = await response.json();
+                            console.log('Stats:', stats);
+                        } catch (error) {
+                            console.error('Stats fetch error:', error);
+                        }
+                    }, 5000);
                 </script>
             </body>
             </html>
             """)
     except Exception as e:
-        return HTMLResponse(content=f"<h1>Dashboard Error</h1><p>{e}</p>")
+        return HTMLResponse(content=f"<h1>Dashboard Error</h1><p>{e}</p>", status_code=500)
 
 @app.get("/api/stats")
 async def get_stats():
-    """Get current system statistics with safe component access."""
+    """Get current system statistics."""
     try:
-        # Get portfolio summary safely
         portfolio = dashboard_server.get_safe_portfolio_summary()
         
-        # Get risk status safely
-        risk_status = dashboard_server.get_safe_risk_status()
-        
-        # Calculate uptime
         uptime = datetime.now() - dashboard_server.stats["uptime_start"]
         
         return {
@@ -313,7 +348,6 @@ async def get_stats():
             "analysis_rate": dashboard_server.stats["analysis_rate"],
             "uptime_hours": round(uptime.total_seconds() / 3600, 2),
             "portfolio": portfolio,
-            "risk_status": risk_status,
             "connected_clients": len(dashboard_server.connected_clients),
             "components_status": {
                 "trading_executor": dashboard_server.trading_executor is not None,
@@ -324,181 +358,102 @@ async def get_stats():
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting stats: {e}")
-        # Return basic stats even if there's an error
         return {
+            "error": str(e),
             "total_opportunities": 0,
-            "high_confidence": 0,
-            "active_chains": 0,
-            "analysis_rate": 0,
-            "uptime_hours": 0,
-            "portfolio": {"error": str(e)},
-            "connected_clients": len(dashboard_server.connected_clients),
-            "error": "Stats calculation failed"
+            "connected_clients": len(dashboard_server.connected_clients)
         }
 
-
-
-
-
-@app.get("/api/opportunities", response_model=List[OpportunityResponse])
+@app.get("/api/opportunities")
 async def get_opportunities():
     """Get current trading opportunities."""
     try:
         opportunities = []
         
         for opp in dashboard_server.opportunities_queue[-20:]:  # Last 20
-            age_minutes = (datetime.now() - opp.detected_at).total_seconds() / 60
-            
-            opportunities.append(OpportunityResponse(
-                token_symbol=opp.token.symbol or "UNKNOWN",
-                token_address=opp.token.address,
-                chain=opp.metadata.get("chain", "ethereum"),
-                risk_level=opp.contract_analysis.risk_level.value,
-                recommendation=opp.metadata.get("recommendation", {}).get("action", "UNKNOWN"),
-                confidence=opp.metadata.get("recommendation", {}).get("confidence", "UNKNOWN"),
-                score=opp.metadata.get("recommendation", {}).get("score", 0.0),
-                liquidity_usd=opp.liquidity.liquidity_usd,
-                age_minutes=int(age_minutes)
-            ))
+            try:
+                detected_time = datetime.fromisoformat(opp.get('detected_at', datetime.now().isoformat()))
+                age_minutes = (datetime.now() - detected_time).total_seconds() / 60
+                
+                opportunities.append({
+                    "token_symbol": opp.get('token_symbol', 'UNKNOWN'),
+                    "token_address": opp.get('token_address', 'unknown'),
+                    "chain": opp.get('chain', 'unknown'),
+                    "risk_level": opp.get('risk_level', 'unknown'),
+                    "recommendation": opp.get('recommendation', 'UNKNOWN'),
+                    "confidence": opp.get('confidence', 'UNKNOWN'),
+                    "score": opp.get('score', 0.0),
+                    "liquidity_usd": opp.get('liquidity_usd', 0),
+                    "age_minutes": int(age_minutes)
+                })
+            except Exception as opp_error:
+                dashboard_server.logger.error(f"Error processing opportunity: {opp_error}")
+                continue
             
         return opportunities
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting opportunities: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return []
 
-@app.get("/api/positions", response_model=List[PositionResponse])
+@app.get("/api/positions")
 async def get_positions():
-    """Get current trading positions with safe access."""
+    """Get current trading positions."""
     try:
         positions = []
         
-        if dashboard_server.position_manager:
-            # Get positions from position manager
+        if dashboard_server.position_manager and hasattr(dashboard_server.position_manager, 'active_positions'):
             for position_id, position in dashboard_server.position_manager.active_positions.items():
-                positions.append(PositionResponse(
-                    token_symbol=position.token_symbol,
-                    amount=float(position.entry_amount),
-                    entry_price=float(position.entry_price),
-                    current_price=float(position.current_price),
-                    pnl=float(position.unrealized_pnl),
-                    pnl_percentage=position.unrealized_pnl_percentage
-                ))
-        elif dashboard_server.trading_executor:
-            # Fallback to trading executor
-            if hasattr(dashboard_server.trading_executor, 'positions'):
-                for position in dashboard_server.trading_executor.positions.values():
-                    positions.append(PositionResponse(
-                        token_symbol=position.token_symbol,
-                        amount=float(position.amount),
-                        entry_price=float(position.entry_price),
-                        current_price=float(position.current_price),
-                        pnl=float(position.pnl),
-                        pnl_percentage=position.pnl_percentage
-                    ))
+                try:
+                    positions.append({
+                        "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
+                        "amount": float(getattr(position, 'entry_amount', 0)),
+                        "entry_price": float(getattr(position, 'entry_price', 0)),
+                        "current_price": float(getattr(position, 'current_price', 0)),
+                        "pnl": float(getattr(position, 'unrealized_pnl', 0)),
+                        "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
+                    })
+                except Exception as pos_error:
+                    dashboard_server.logger.error(f"Error processing position {position_id}: {pos_error}")
+                    continue
             
         return positions
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting positions: {e}")
-        # Return empty list on error rather than raising exception
         return []
-
-
-
-
-
 
 @app.get("/api/trades")
 async def get_trade_history():
-    """Get recent trade history with safe access."""
+    """Get recent trade history."""
     try:
         trades = []
         
-        if dashboard_server.position_manager:
-            # Get closed positions from position manager
-            for exit in dashboard_server.position_manager.closed_positions[-50:]:  # Last 50
-                trades.append({
-                    "id": exit.position_id,
-                    "token_symbol": dashboard_server.position_manager._get_token_from_position_id(exit.position_id),
-                    "trade_type": "sell",  # Exit trades
-                    "amount": float(exit.exit_amount),
-                    "status": "completed",
-                    "created_at": exit.exit_time.isoformat(),
-                    "executed_at": exit.exit_time.isoformat(),
-                    "tx_hash": exit.exit_tx_hash,
-                    "chain": dashboard_server.position_manager._get_chain_from_position_id(exit.position_id),
-                    "pnl": float(exit.realized_pnl),
-                    "pnl_percentage": exit.realized_pnl_percentage
-                })
-        elif dashboard_server.trading_executor:
-            # Fallback to trading executor
-            if hasattr(dashboard_server.trading_executor, 'trade_history'):
-                for trade in dashboard_server.trading_executor.trade_history[-50:]:
+        # Try to get trades from position manager
+        if dashboard_server.position_manager and hasattr(dashboard_server.position_manager, 'closed_positions'):
+            for exit in dashboard_server.position_manager.closed_positions[-20:]:  # Last 20
+                try:
                     trades.append({
-                        "id": trade.id,
-                        "token_symbol": trade.token_symbol,
-                        "trade_type": trade.trade_type.value,
-                        "amount": float(trade.amount),
-                        "status": trade.status.value,
-                        "created_at": trade.created_at.isoformat(),
-                        "executed_at": trade.executed_at.isoformat() if trade.executed_at else None,
-                        "tx_hash": trade.tx_hash,
-                        "chain": trade.chain
+                        "id": getattr(exit, 'position_id', 'unknown'),
+                        "token_symbol": getattr(exit, 'position_id', 'UNKNOWN').split('_')[0],
+                        "trade_type": "close",
+                        "amount": float(getattr(exit, 'exit_amount', 0)),
+                        "status": "completed",
+                        "created_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                        "executed_at": getattr(exit, 'exit_time', datetime.now()).isoformat(),
+                        "tx_hash": getattr(exit, 'exit_tx_hash', None),
+                        "chain": "unknown",
+                        "pnl": float(getattr(exit, 'realized_pnl', 0))
                     })
+                except Exception as trade_error:
+                    dashboard_server.logger.error(f"Error processing trade: {trade_error}")
+                    continue
             
         return {"trades": trades}
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting trade history: {e}")
         return {"trades": [], "error": str(e)}
-
-
-
-
-
-@app.post("/api/trade")
-async def execute_trade(trade_request: TradeRequest):
-    """Execute a manual trade."""
-    try:
-        dashboard_server.logger.info(f"Manual trade request: {trade_request.token_symbol}")
-        
-        if not dashboard_server.trading_executor:
-            return {"success": False, "message": "Trading executor not available"}
-        
-        # Execute the trade
-        result = await dashboard_server.trading_executor.manual_trade(
-            token_address=trade_request.token_address,
-            amount=trade_request.amount,
-            chain=trade_request.chain
-        )
-        
-        if result:
-            # Broadcast trade execution to connected clients
-            await dashboard_server.broadcast_message({
-                "type": "trade_executed",
-                "data": {
-                    "token_symbol": trade_request.token_symbol,
-                    "amount": trade_request.amount,
-                    "status": result.status.value,
-                    "tx_hash": result.tx_hash
-                }
-            })
-            
-            return {
-                "success": True,
-                "trade_id": result.id,
-                "message": f"Trade executed for {trade_request.token_symbol}"
-            }
-        else:
-            return {
-                "success": False,
-                "message": "Trade execution failed"
-            }
-            
-    except Exception as e:
-        dashboard_server.logger.error(f"Error executing trade: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -531,86 +486,78 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in dashboard_server.connected_clients:
             dashboard_server.connected_clients.remove(websocket)
 
-@app.get("/api/system/status")
-async def get_system_status():
-    """Get detailed system status."""
-    try:
-        uptime = datetime.now() - dashboard_server.stats["uptime_start"]
-        
-        return {
-            "status": "running",
-            "uptime_seconds": uptime.total_seconds(),
-            "connected_clients": len(dashboard_server.connected_clients),
-            "trading_executor_initialized": dashboard_server.trading_executor is not None,
-            "opportunities_in_queue": len(dashboard_server.opportunities_queue),
-            "chains": {
-                "ethereum": {"status": "active"},
-                "base": {"status": "active"},
-                "solana": {"status": "active"}
-            }
-        }
-        
-    except Exception as e:
-        dashboard_server.logger.error(f"Error getting system status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/export/data")
-async def export_data():
-    """Export trading data for analysis."""
-    try:
-        export_data = {
-            "timestamp": datetime.now().isoformat(),
-            "stats": dashboard_server.stats,
-            "opportunities": [
-                {
-                    "token_symbol": opp.token.symbol,
-                    "token_address": opp.token.address,
-                    "chain": opp.metadata.get("chain"),
-                    "risk_level": opp.contract_analysis.risk_level.value,
-                    "recommendation": opp.metadata.get("recommendation", {}),
-                    "detected_at": opp.detected_at.isoformat(),
-                    "liquidity_usd": opp.liquidity.liquidity_usd
-                }
-                for opp in dashboard_server.opportunities_queue
-            ],
-            "trade_history": [
-                {
-                    "id": trade.id,
-                    "token_symbol": trade.token_symbol,
-                    "trade_type": trade.trade_type.value,
-                    "amount": float(trade.amount),
-                    "status": trade.status.value,
-                    "created_at": trade.created_at.isoformat(),
-                    "executed_at": trade.executed_at.isoformat() if trade.executed_at else None,
-                    "chain": trade.chain
-                }
-                for trade in dashboard_server.trading_executor.trade_history
-            ] if dashboard_server.trading_executor else [],
-            "positions": [
-                {
-                    "token_symbol": pos.token_symbol,
-                    "amount": float(pos.amount),
-                    "entry_price": float(pos.entry_price),
-                    "current_price": float(pos.current_price),
-                    "pnl": float(pos.pnl),
-                    "entry_time": pos.entry_time.isoformat()
-                }
-                for pos in dashboard_server.trading_executor.positions.values()
-            ] if dashboard_server.trading_executor else []
-        }
-        
-        return export_data
-        
-    except Exception as e:
-        dashboard_server.logger.error(f"Error exporting data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 if __name__ == "__main__":
     # Development server
     uvicorn.run(
         "dashboard_server:app",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
-        reload=True,
+        reload=False,
         log_level="info"
     )
+
+    @app.get("/api/opportunity/{token_address}")
+async def get_opportunity_details(token_address: str):
+    """Get detailed information about a specific opportunity."""
+    try:
+        # Find opportunity by token address
+        for opp in dashboard_server.opportunities_queue:
+            if opp.get('token_address') == token_address:
+                # Add additional details that might not be in the basic opportunity data
+                detailed_opp = opp.copy()
+                
+                # Add timestamp information
+                detected_time = datetime.fromisoformat(opp.get('detected_at', datetime.now().isoformat()))
+                detailed_opp['age_seconds'] = (datetime.now() - detected_time).total_seconds()
+                
+                # Add analysis timestamp if available
+                if 'analysis_timestamp' in opp:
+                    analysis_time = datetime.fromisoformat(opp['analysis_timestamp'])
+                    detailed_opp['analysis_age_seconds'] = (datetime.now() - analysis_time).total_seconds()
+                
+                return detailed_opp
+        
+        # If not found, return 404
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error getting opportunity details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chain/{chain_name}/stats")
+async def get_chain_stats(chain_name: str):
+    """Get statistics for a specific chain."""
+    try:
+        chain_opportunities = [
+            opp for opp in dashboard_server.opportunities_queue 
+            if opp.get('chain', '').upper() == chain_name.upper()
+        ]
+        
+        total_count = len(chain_opportunities)
+        high_confidence_count = len([
+            opp for opp in chain_opportunities 
+            if opp.get('confidence') == 'HIGH'
+        ])
+        
+        # Calculate average score
+        scores = [opp.get('score', 0) for opp in chain_opportunities if opp.get('score')]
+        avg_score = sum(scores) / len(scores) if scores else 0
+        
+        # Get recommendation distribution
+        recommendations = {}
+        for opp in chain_opportunities:
+            rec = opp.get('recommendation', 'UNKNOWN')
+            recommendations[rec] = recommendations.get(rec, 0) + 1
+        
+        return {
+            "chain": chain_name.upper(),
+            "total_opportunities": total_count,
+            "high_confidence_count": high_confidence_count,
+            "average_score": round(avg_score, 3),
+            "recommendation_distribution": recommendations,
+            "recent_opportunities": chain_opportunities[-10:]  # Last 10
+        }
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error getting chain stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
