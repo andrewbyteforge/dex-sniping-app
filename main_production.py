@@ -213,90 +213,105 @@ class ProductionTradingSystem:
             raise
 
     async def _initialize_web_dashboard(self) -> None:
-        """Initialize web dashboard with production features and better error handling."""
+        """Initialize web dashboard with proper integration."""
         try:
             self.logger.info("Initializing production web dashboard...")
             
-            # Import dashboard components
-            from api.dashboard_server import app, dashboard_server
-            self.logger.debug("Dashboard server imports successful")
+            # Import dashboard using the working method
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "dashboard_server", 
+                "api/dashboard_server.py"
+            )
+            dashboard_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(dashboard_module)
             
-            # Connect trading components to dashboard
-            self.dashboard_server = dashboard_server
+            # Get dashboard components
+            self.dashboard_server = dashboard_module.dashboard_server
+            self.dashboard_app = dashboard_module.app
             
-            # Only connect components that exist
-            if hasattr(self, 'execution_engine') and self.execution_engine:
+            # Connect trading components safely
+            if hasattr(self, 'execution_engine'):
                 self.dashboard_server.trading_executor = self.execution_engine
-            
-            if hasattr(self, 'risk_manager') and self.risk_manager:
+            if hasattr(self, 'risk_manager'):
                 self.dashboard_server.risk_manager = self.risk_manager
-                
-            if hasattr(self, 'position_manager') and self.position_manager:
+            if hasattr(self, 'position_manager'):
                 self.dashboard_server.position_manager = self.position_manager
             
-            # Initialize dashboard server
+            # Initialize dashboard
             await self.dashboard_server.initialize()
-            self.logger.debug("Dashboard server initialized")
-            
-            # Check if port 8000 is available
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(1)
-                result = sock.connect_ex(('127.0.0.1', 8000))
-                
-                if result == 0:
-                    self.logger.warning("Port 8000 is already in use")
-                    self.logger.info("Trying alternative port 8001...")
-                    port = 8001
-                else:
-                    port = 8000
-            
-            # Start FastAPI server
-            import uvicorn
-            
-            config = uvicorn.Config(
-                app,
-                host="127.0.0.1",  # Use localhost instead of 0.0.0.0 for Windows
-                port=port,
-                log_level="warning",
-                access_log=False,
-                use_colors=False,
-                loop="asyncio"  # Specify loop type for Windows
-            )
-            
-            server = uvicorn.Server(config)
             
             # Start server in background
-            self.web_server_task = asyncio.create_task(self._run_dashboard_server(server))
+            self.web_server_task = asyncio.create_task(self._start_dashboard_server())
             
-            # Give server time to start
+            # Wait for startup
             await asyncio.sleep(3)
             
             # Check if server started successfully
             if not self.web_server_task.done():
                 self.components_initialized['web_dashboard'] = True
                 self.logger.info("✅ Production web dashboard initialized")
-                self.logger.info(f"   🌐 Dashboard: http://localhost:{port}")
-                self.logger.info("   📊 Real-time position tracking")
-                self.logger.info("   💹 Live P&L monitoring")
-                self.logger.info("   ⚠️  Risk management dashboard")
+                self.logger.info("   🌐 Dashboard: http://localhost:8000")
+                self.logger.info("   📊 Real-time opportunity tracking")
+                self.logger.info("   💹 Live trading monitoring")
             else:
-                # Server failed to start
-                try:
-                    result = await self.web_server_task
-                    self.logger.warning(f"Dashboard server exited: {result}")
-                except Exception as e:
-                    self.logger.warning(f"Dashboard server failed: {e}")
-                
+                self.logger.warning("Dashboard server failed to start")
                 self.web_server_task = None
-                self.logger.info("Continuing without web dashboard")
                 
         except Exception as e:
-            self.logger.warning(f"Web dashboard initialization failed: {e}")
-            self.logger.info("Continuing without web dashboard - console mode only")
+            self.logger.warning(f"Dashboard initialization failed: {e}")
+            self.logger.info("Continuing without dashboard - console mode only")
+
+    async def _start_dashboard_server(self):
+        """Start dashboard server in background."""
+        try:
+            import uvicorn
             
-            # Don't let dashboard failure stop the system
-            self.web_server_task = None
+            config = uvicorn.Config(
+                self.dashboard_app,  # Use the loaded app
+                host="127.0.0.1",
+                port=8000,
+                log_level="warning",
+                access_log=False
+            )
+            
+            server = uvicorn.Server(config)
+            await server.serve()
+            
+        except Exception as e:
+            self.logger.error(f"Dashboard server error: {e}")
+
+    # Update the dashboard update methods to use the working integration
+
+    async def _update_dashboard_safe(self, opportunity: TradingOpportunity) -> None:
+        """Safely update dashboard without breaking the main pipeline."""
+        try:
+            if (hasattr(self, 'dashboard_server') and 
+                self.dashboard_server and 
+                self.components_initialized.get('web_dashboard', False)):
+                
+                await self.dashboard_server.add_opportunity(opportunity)
+                
+        except Exception as e:
+            # Don't let dashboard errors break the trading pipeline
+            self.logger.debug(f"Dashboard update failed (non-critical): {e}")
+
+    async def _broadcast_trade_safe(self, message: Dict) -> None:
+        """Safely broadcast trade message without breaking execution."""
+        try:
+            if (hasattr(self, 'dashboard_server') and 
+                self.dashboard_server and 
+                self.components_initialized.get('web_dashboard', False)):
+                
+                await self.dashboard_server.broadcast_to_clients(message)
+                
+        except Exception as e:
+            # Don't let dashboard broadcast errors break trading
+            self.logger.debug(f"Dashboard broadcast failed (non-critical): {e}")
+
+
+
+
 
     async def _run_dashboard_server(self, server) -> None:
         """
