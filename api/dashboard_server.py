@@ -36,6 +36,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
 class SimpleDashboardServer:
     """
     Simplified dashboard server with minimal dependencies and comprehensive error handling.
@@ -1527,6 +1529,12 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"WebSocket cleanup complete. Remaining clients: {len(dashboard_server.connected_clients)}")
 
 
+# Add these imports at the top after existing imports
+from models.watchlist import watchlist_manager, WatchlistStatus
+from models.token import TokenInfo, LiquidityInfo, TradingOpportunity, ContractAnalysis, SocialMetrics
+
+# Add these endpoints after the existing endpoints:
+
 @app.get("/api/watchlist")
 async def get_watchlist(status: Optional[str] = None):
     """Get watchlist items, optionally filtered by status."""
@@ -1550,6 +1558,8 @@ async def get_watchlist(status: Optional[str] = None):
         dashboard_server.logger.error(f"Error getting watchlist: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Update the add_to_watchlist function in api/dashboard_server.py:
+
 @app.post("/api/watchlist/add")
 async def add_to_watchlist(request: dict):
     """Add a token to the watchlist."""
@@ -1559,20 +1569,37 @@ async def add_to_watchlist(request: dict):
             if field not in request:
                 raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
         
-        # For now, create a minimal opportunity object
-        # In a real implementation, you'd retrieve the full opportunity
-        from models.token import TokenInfo, LiquidityInfo, TradingOpportunity, ContractAnalysis, SocialMetrics
+        # Create minimal opportunity object for watchlist
+        # Handle different address formats for different chains
+        token_address = request['token_address']
+        chain = request['chain'].upper()
         
-        token_info = TokenInfo(
-            address=request['token_address'],
-            symbol=request.get('token_symbol', 'UNKNOWN'),
-            name=request.get('token_name')
-        )
+        # Create a flexible TokenInfo that doesn't validate address format for Solana
+        if 'SOLANA' in chain:
+            # For Solana, create a custom token object that bypasses validation
+            token_info = type('SolanaTokenInfo', (), {
+                'address': token_address,
+                'symbol': request.get('token_symbol', 'UNKNOWN'),
+                'name': request.get('token_name'),
+                'decimals': 6,
+                'total_supply': 1000000000
+            })()
+        else:
+            # For EVM chains, use the regular TokenInfo with validation
+            from models.token import TokenInfo
+            token_info = TokenInfo(
+                address=token_address,
+                symbol=request.get('token_symbol', 'UNKNOWN'),
+                name=request.get('token_name')
+            )
+        
+        from models.token import LiquidityInfo, TradingOpportunity, ContractAnalysis, SocialMetrics
+        from datetime import datetime
         
         liquidity_info = LiquidityInfo(
             pair_address=request.get('pair_address', ''),
             dex_name=request.get('dex_name', 'Unknown'),
-            token0=request['token_address'],
+            token0=token_address,
             token1='',
             reserve0=0.0,
             reserve1=0.0,
@@ -1588,8 +1615,14 @@ async def add_to_watchlist(request: dict):
             social_metrics=SocialMetrics()
         )
         
-        opportunity.metadata['chain'] = request['chain']
+        opportunity.metadata['chain'] = chain
         opportunity.metadata['recommendation'] = request.get('recommendation', {})
+        
+        # Import watchlist manager
+        try:
+            from models.watchlist import watchlist_manager
+        except ImportError:
+            return {"success": False, "message": "Watchlist system not available"}
         
         success = watchlist_manager.add_to_watchlist(
             opportunity=opportunity,
@@ -1600,15 +1633,27 @@ async def add_to_watchlist(request: dict):
         )
         
         if success:
-            # Broadcast to connected clients
-            await dashboard_server.broadcast_message({
-                "type": "watchlist_updated",
-                "data": {
-                    "action": "added",
-                    "token_symbol": token_info.symbol,
-                    "token_address": request['token_address']
-                }
-            })
+            # Try to broadcast to connected clients, but don't fail if method doesn't exist
+            try:
+                if hasattr(dashboard_server, 'broadcast_message'):
+                    await dashboard_server.broadcast_message({
+                        "type": "watchlist_updated",
+                        "data": {
+                            "action": "added",
+                            "token_symbol": token_info.symbol if hasattr(token_info, 'symbol') else request.get('token_symbol', 'UNKNOWN'),
+                            "token_address": token_address
+                        }
+                    })
+                else:
+                    # If no broadcast method, just log it
+                    import logging
+                    logger = logging.getLogger("DashboardAPI")
+                    logger.info(f"Watchlist updated: {token_info.symbol if hasattr(token_info, 'symbol') else request.get('token_symbol', 'UNKNOWN')} added")
+            except Exception as broadcast_error:
+                # Don't fail the whole request if broadcast fails
+                import logging
+                logger = logging.getLogger("DashboardAPI")
+                logger.warning(f"Failed to broadcast watchlist update: {broadcast_error}")
             
             return {"success": True, "message": "Added to watchlist"}
         else:
@@ -1617,8 +1662,17 @@ async def add_to_watchlist(request: dict):
     except HTTPException:
         raise
     except Exception as e:
-        dashboard_server.logger.error(f"Error adding to watchlist: {e}")
+        # Use a simple logger approach since dashboard_server.logger may not exist
+        import logging
+        logger = logging.getLogger("DashboardAPI")
+        logger.error(f"Error adding to watchlist: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+
+
+
 
 @app.delete("/api/watchlist/remove")
 async def remove_from_watchlist(token_address: str, chain: str):

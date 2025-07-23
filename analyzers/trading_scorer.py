@@ -7,7 +7,13 @@ Combines contract analysis, social metrics, and market data to score opportuniti
 from typing import Dict, List, Tuple
 from datetime import datetime
 import math
-
+# At the top of analyzers/trading_scorer.py, add this import:
+from models.token import TradingOpportunity, RiskLevel
+# Add this line:
+try:
+    from models.watchlist import watchlist_manager
+except ImportError:
+    watchlist_manager = None  # Graceful fallback if watchlist not available
 from models.token import TradingOpportunity, RiskLevel
 from utils.logger import logger_manager
 
@@ -245,17 +251,17 @@ class TradingScorer:
             
             # Determine recommendation
             if score >= 0.8 and risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]:
-                action = "STRONG BUY"
+                action = "STRONG_BUY"
                 confidence = "HIGH"
-                position_size = 0.8  # 80% of max position
+                position_size = 0.8
             elif score >= 0.65 and risk_level != RiskLevel.CRITICAL:
                 action = "BUY"
                 confidence = "MEDIUM"
-                position_size = 0.5  # 50% of max position
+                position_size = 0.5
             elif score >= 0.45 and risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]:
-                action = "SMALL BUY"
+                action = "SMALL_BUY"
                 confidence = "LOW"
-                position_size = 0.2  # 20% of max position
+                position_size = 0.2
             elif score >= 0.3:
                 action = "WATCH"
                 confidence = "NEUTRAL"
@@ -267,9 +273,9 @@ class TradingScorer:
                 
             # Calculate suggested position sizes for different chains
             max_positions = {
-                'ETHEREUM': 0.1,   # ETH
-                'BASE': 0.5,       # ETH on Base
-                'SOLANA': 100      # SOL
+                'ETHEREUM': 0.1,
+                'BASE': 0.5,
+                'SOLANA': 100
             }
             
             chain = opportunity.metadata.get('chain', 'ETHEREUM').upper()
@@ -287,6 +293,31 @@ class TradingScorer:
                 'warnings': self._get_risk_warnings(opportunity)
             }
             
+            # AUTO-ADD TO WATCHLIST for WATCH recommendations
+            if action == "WATCH" and watchlist_manager is not None:
+                try:
+                    reason = f"Auto-added: Score {score:.2f}, {confidence} confidence"
+                    target_price = None  # Could calculate based on analysis
+                    
+                    success = watchlist_manager.add_to_watchlist(
+                        opportunity=opportunity,
+                        reason=reason,
+                        target_price=target_price,
+                        notes=f"Generated recommendation: {action} ({confidence})"
+                    )
+                    
+                    if success:
+                        self.logger.info(f"Auto-added to watchlist: {opportunity.token.symbol}")
+                        recommendation['watchlist_added'] = True
+                    else:
+                        recommendation['watchlist_added'] = False
+                        
+                except Exception as e:
+                    self.logger.error(f"Failed to auto-add to watchlist: {e}")
+                    recommendation['watchlist_added'] = False
+            else:
+                recommendation['watchlist_added'] = False
+            
             return recommendation
             
         except Exception as e:
@@ -298,9 +329,16 @@ class TradingScorer:
                 'risk_level': 'CRITICAL',
                 'suggested_position': 0.0,
                 'reasons': ['Analysis failed'],
-                'warnings': ['Could not analyze token safety']
+                'warnings': ['Could not analyze token safety'],
+                'watchlist_added': False
             }
-            
+
+
+
+
+
+
+
     def _get_recommendation_reasons(self, opportunity: TradingOpportunity) -> List[str]:
         """Get list of reasons supporting the recommendation - Windows compatible."""
         reasons = []

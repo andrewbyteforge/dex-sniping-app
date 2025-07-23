@@ -104,6 +104,7 @@ class WatchlistManager:
             directory = os.path.dirname(self.storage_file)
             if directory and not os.path.exists(directory):
                 os.makedirs(directory)
+                self.logger.info(f"Created storage directory: {directory}")
         except Exception as e:
             self.logger.error(f"Failed to create storage directory: {e}")
     

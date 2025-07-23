@@ -22,11 +22,11 @@
             min-height: 100vh;
             display: grid;
             grid-template-areas: 
-                "header header header"
-                "stats stats stats"
-                "opportunities chains analytics"
-                "recent recent recent";
-            grid-template-columns: 1fr 300px 300px;
+                "header header header header"
+                "stats stats stats stats"
+                "opportunities chains analytics watchlist"
+                "recent recent recent recent";
+            grid-template-columns: 1fr 300px 300px 300px;
             grid-template-rows: auto auto 1fr auto;
             gap: 20px;
             padding: 20px;
@@ -241,6 +241,54 @@
             color: rgba(255, 255, 255, 0.5);
         }
 
+        /* Watchlist Panel Styles */
+        .watchlist-panel {
+            grid-area: watchlist;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+        }
+
+        .watchlist-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .watchlist-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .watchlist-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .watchlist-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .watchlist-details {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+            line-height: 1.4;
+        }
+
+        .watch-button {
+            background: linear-gradient(45deg, #ffc107, #ffb300);
+            color: #000;
+            font-weight: 600;
+        }
+
+        .watch-button:hover {
+            box-shadow: 0 8px 20px rgba(255, 193, 7, 0.3);
+        }
+
         .recent-trades {
             grid-area: recent;
             background: rgba(255, 255, 255, 0.03);
@@ -366,6 +414,7 @@
                     "header"
                     "stats"
                     "opportunities"
+                    "watchlist"
                     "chains"
                     "analytics"
                     "recent";
@@ -378,7 +427,7 @@
     <div class="dashboard">
         <!-- Header -->
         <div class="header">
-            <h1>🚀 Multi-Chain DEX Sniping Dashboard</h1>
+            <h1>Multi-Chain DEX Sniping Dashboard</h1>
             <p>Real-time monitoring across Ethereum, Base, and Solana</p>
             <div class="header-controls">
                 <div class="status-indicator">
@@ -420,7 +469,7 @@
         <!-- Opportunities Panel -->
         <div class="opportunities">
             <div class="section-header">
-                <span>🎯 Live Opportunities</span>
+                <span>Live Opportunities</span>
                 <span class="controls">
                     <button class="action-button" onclick="clearOpportunities()">Clear</button>
                 </span>
@@ -436,7 +485,7 @@
         <!-- Chains Panel -->
         <div class="chains-panel">
             <div class="section-header">
-                <span>⛓️ Chain Status</span>
+                <span>Chain Status</span>
             </div>
             <div class="chain-item">
                 <div class="chain-name">
@@ -467,17 +516,33 @@
         <!-- Analytics Panel -->
         <div class="analytics-panel">
             <div class="section-header">
-                <span>📊 Analytics</span>
+                <span>Analytics</span>
             </div>
             <div class="analytics-chart">
                 Auto-refreshing every 5 seconds
             </div>
         </div>
 
+        <!-- Watchlist Panel -->
+        <div class="watchlist-panel">
+            <div class="section-header">
+                <span>Watchlist</span>
+                <span class="controls">
+                    <button class="action-button" onclick="loadWatchlist()">Refresh</button>
+                </span>
+            </div>
+            <div id="watchlist-container" class="watchlist-container">
+                <div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">
+                    <div class="loading"></div>
+                    <p>Loading watchlist...</p>
+                </div>
+            </div>
+        </div>
+
         <!-- Recent Activity -->
         <div class="recent-trades">
             <div class="section-header">
-                <span>📈 Recent Analysis</span>
+                <span>Recent Analysis</span>
             </div>
             <table class="trades-table">
                 <thead>
@@ -517,25 +582,148 @@
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 5;
 
+    // Watchlist functionality
+    function addToWatchlistFromOpp(opportunityIndex) {
+        const opp = dashboardData.opportunities[opportunityIndex];
+        if (!opp) {
+            showNotification('Opportunity not found', 'error');
+            return;
+        }
+        
+        const data = {
+            token_symbol: opp.token.symbol,
+            token_address: opp.token.address,
+            chain: opp.chain.toUpperCase(),
+            reason: `Added from dashboard - ${new Date().toLocaleString()}`,
+            notes: `Manual addition via web interface`,
+            liquidity_usd: opp.liquidity?.liquidity_usd || 0,
+            dex_name: opp.liquidity?.dex_name || 'Unknown',
+            pair_address: opp.liquidity?.pair_address || '',
+            recommendation: {
+                action: opp.recommendation,
+                confidence: opp.confidence,
+                score: opp.score
+            }
+        };
+        
+        addToWatchlist(data);
+    }
+
+    function addToWatchlist(data) {
+        fetch('/api/watchlist/add', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                showNotification(`${data.token_symbol} added to watchlist`, 'success');
+                loadWatchlist(); // Refresh watchlist display
+            } else {
+                showNotification(`Failed to add ${data.token_symbol}: ${result.message}`, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error adding to watchlist:', error);
+            showNotification(`Error adding ${data.token_symbol} to watchlist`, 'error');
+        });
+    }
+
+    function removeFromWatchlist(tokenAddress, chain, tokenSymbol) {
+        fetch(`/api/watchlist/remove?token_address=${tokenAddress}&chain=${chain}`, {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                showNotification(`${tokenSymbol} removed from watchlist`, 'success');
+                loadWatchlist(); // Refresh watchlist display
+            } else {
+                showNotification(`Failed to remove ${tokenSymbol}`, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error removing from watchlist:', error);
+            showNotification(`Error removing ${tokenSymbol}`, 'error');
+        });
+    }
+
+    function loadWatchlist() {
+        fetch('/api/watchlist')
+            .then(response => response.json())
+            .then(data => {
+                renderWatchlist(data.items || []);
+            })
+            .catch(error => {
+                console.error('Error loading watchlist:', error);
+                const container = document.getElementById('watchlist-container');
+                if (container) {
+                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">Error loading watchlist</div>';
+                }
+            });
+    }
+
+    function renderWatchlist(items) {
+        const container = document.getElementById('watchlist-container');
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        if (items.length === 0) {
+            container.innerHTML = '<div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">No items in watchlist...</div>';
+            return;
+        }
+        
+        items.forEach(item => {
+            const itemElement = document.createElement('div');
+            itemElement.className = 'watchlist-item';
+            
+            const chainClass = item.chain ? item.chain.toLowerCase() : 'unknown';
+            const addedDate = item.added_at ? new Date(item.added_at).toLocaleDateString() : 'Unknown';
+            const score = item.score || 0;
+            
+            itemElement.innerHTML = `
+                <div class="watchlist-header">
+                    <span class="token-symbol">${item.token_symbol || 'Unknown'}</span>
+                    <span class="risk-badge risk-${item.risk_level || 'medium'}">${(item.risk_level || 'medium').toUpperCase()}</span>
+                </div>
+                <div class="watchlist-details">
+                    <span class="chain-badge chain-${chainClass}">${(item.chain || 'UNKNOWN').toUpperCase()}</span>
+                    Added: ${addedDate} | Score: ${score.toFixed(2)}
+                    ${item.reason ? `<br>Reason: ${item.reason}` : ''}
+                    <div style="margin-top: 8px;">
+                        <button class="action-button" onclick="executeTrade('${item.token_symbol}')">Trade</button>
+                        <button class="action-button danger" onclick="removeFromWatchlist('${item.token_address}', '${item.chain}', '${item.token_symbol}')">Remove</button>
+                    </div>
+                </div>
+            `;
+            container.appendChild(itemElement);
+        });
+    }
+
     // Initialize dashboard
     function initDashboard() {
-        console.log('🚀 Initializing dashboard...');
+        console.log('Initializing dashboard...');
         updateStats();
         renderOpportunities();
         renderRecentActivity();
+        loadWatchlist(); // Load watchlist on startup
         startAutoRefresh();
         connectWebSocket();
-        console.log('✅ Dashboard initialized');
+        console.log('Dashboard initialized');
     }
 
     // Auto-refresh functionality
     function startAutoRefresh() {
         if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-        console.log('🔄 Starting auto-refresh (5s interval)');
+        console.log('Starting auto-refresh (5s interval)');
         loadRealData();
         autoRefreshTimer = setInterval(() => {
             if (autoRefreshEnabled) {
-                console.log('🔄 Auto-refreshing...');
+                console.log('Auto-refreshing...');
                 loadRealData();
                 updateAgeTimestamps();
             }
@@ -549,11 +737,11 @@
         if (autoRefreshEnabled) {
             btn.textContent = 'Disable Auto-Refresh';
             indicator.textContent = 'Auto-Refresh Active';
-            console.log('✅ Auto-refresh enabled');
+            console.log('Auto-refresh enabled');
         } else {
             btn.textContent = 'Enable Auto-Refresh';
             indicator.textContent = 'Auto-Refresh Disabled';
-            console.log('❌ Auto-refresh disabled');
+            console.log('Auto-refresh disabled');
         }
     }
 
@@ -579,7 +767,7 @@
                         pair_address: opp.pair_address || ''
                     }
                 }));
-                console.log(`📊 Loaded ${opportunities.length} opportunities`);
+                console.log(`Loaded ${opportunities.length} opportunities`);
             }
 
             const stats = await apiRequest('/stats');
@@ -608,7 +796,7 @@
             renderOpportunities();
             renderRecentActivity();
         } catch (error) {
-            console.error('❌ Failed to load data:', error);
+            console.error('Failed to load data:', error);
             showNotification('Failed to refresh data', 'error');
         }
     }
@@ -644,10 +832,10 @@
     // WebSocket connection
     function connectWebSocket() {
         try {
-            console.log('🌐 Connecting WebSocket...');
+            console.log('Connecting WebSocket...');
             ws = new WebSocket('ws://localhost:8000/ws');
             ws.onopen = function(event) {
-                console.log('✅ WebSocket connected');
+                console.log('WebSocket connected');
                 reconnectAttempts = 0;
                 ws.send(JSON.stringify({
                     type: 'subscribe',
@@ -656,14 +844,14 @@
             };
             ws.onmessage = function(event) {
                 const message = JSON.parse(event.data);
-                console.log('📨 WebSocket message:', message.type);
+                console.log('WebSocket message:', message.type);
                 handleWebSocketMessage(message);
             };
             ws.onclose = function(event) {
-                console.log('❌ WebSocket disconnected');
+                console.log('WebSocket disconnected');
                 if (reconnectAttempts < maxReconnectAttempts) {
                     reconnectAttempts++;
-                    console.log(`🔄 Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`);
+                    console.log(`Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`);
                     setTimeout(connectWebSocket, 3000 * reconnectAttempts);
                 }
             };
@@ -678,18 +866,25 @@
     function handleWebSocketMessage(message) {
         switch (message.type) {
             case 'new_opportunity':
-                console.log('🎯 New opportunity via WebSocket:', message.data.token_symbol);
+                console.log('New opportunity via WebSocket:', message.data.token_symbol);
                 loadRealData();
                 showNotification(`New opportunity: ${message.data.token_symbol}`, 'success');
                 break;
             case 'trade_executed':
                 showNotification(`Trade executed: ${message.data.token_symbol}`, 'success');
                 break;
+            case 'watchlist_updated':
+                console.log('Watchlist updated via WebSocket');
+                loadWatchlist(); // Refresh watchlist
+                if (message.data.action === 'added') {
+                    showNotification(`${message.data.token_symbol} added to watchlist`, 'info');
+                }
+                break;
             case 'stats_update':
                 updateStatsFromWS(message.data);
                 break;
             case 'subscribed':
-                console.log('✅ Subscribed to WebSocket updates');
+                console.log('Subscribed to WebSocket updates');
                 break;
             default:
                 console.log('Unknown message type:', message.type);
@@ -731,6 +926,7 @@
                     <span class="recommendation rec-${opp.recommendation.toLowerCase().replace('_', '-')}">${opp.recommendation}</span>
                     <div style="margin-top: 8px;">
                         <button class="action-button" onclick="executeTrade('${opp.token.symbol}')">Trade</button>
+                        <button class="action-button watch-button" onclick="addToWatchlistFromOpp(${index})">Watch</button>
                         <button class="action-button" onclick="viewTokenDetails(${index})">Details</button>
                     </div>
                 </div>
@@ -746,10 +942,10 @@
             showNotification('Opportunity not found', 'error');
             return;
         }
-        showTokenDetailsModal(opp);
+        showTokenDetailsModal(opp, opportunityIndex);
     }
 
-    function showTokenDetailsModal(opportunity) {
+    function showTokenDetailsModal(opportunity, opportunityIndex) {
         // Remove existing modal if any
         const existingModal = document.getElementById('token-details-modal');
         if (existingModal) existingModal.remove();
@@ -796,7 +992,7 @@
                         </div>
                         ${warnings.length > 0 ? `
                         <div class="warnings-section">
-                            <h4>⚠️ Risk Warnings</h4>
+                            <h4>Risk Warnings</h4>
                             <ul class="warning-list">${warnings.map(warning => `<li>${warning}</li>`).join('')}</ul>
                         </div>` : ''}
                     </div>
@@ -822,7 +1018,7 @@
                             <div class="rec-score">Score: ${opportunity.score ? opportunity.score.toFixed(3) : 'N/A'}</div>
                             ${reasons.length > 0 ? `
                             <div class="reasons-section">
-                                <h4>✅ Positive Factors</h4>
+                                <h4>Positive Factors</h4>
                                 <ul class="reason-list">${reasons.map(reason => `<li>${reason}</li>`).join('')}</ul>
                             </div>` : ''}
                         </div>
@@ -857,7 +1053,7 @@
                 </div>
                 <div class="modal-footer">
                     <button class="action-button" onclick="executeTrade('${token.symbol}')">Execute Trade</button>
-                    <button class="action-button" onclick="addToWatchlist('${token.symbol}')">Add to Watchlist</button>
+                    <button class="action-button watch-button" onclick="addToWatchlistFromOpp(${opportunityIndex}); closeTokenDetailsModal();">Add to Watchlist</button>
                     <button class="action-button danger" onclick="closeTokenDetailsModal()">Close</button>
                 </div>
             </div>
@@ -955,11 +1151,6 @@
         });
     }
 
-    function addToWatchlist(tokenSymbol) {
-        showNotification(`${tokenSymbol} added to watchlist!`, 'info');
-        // Implement your real watchlist logic here if desired
-    }
-
     // Render recent activity
     function renderRecentActivity() {
         const tbody = document.getElementById('recent-activity');
@@ -1007,10 +1198,6 @@
 
     function executeTrade(token) {
         showNotification(`Trade execution for ${token} - Feature coming soon!`, 'info');
-    }
-
-    function viewDetails(token) {
-        showNotification(`Viewing details for ${token}`, 'info');
     }
 
     // Notification system
