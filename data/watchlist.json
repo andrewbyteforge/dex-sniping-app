@@ -3244,29 +3244,6 @@
       "last_updated": "2025-07-23T14:13:33.436166"
     },
     {
-      "token_address": "0xC0530416AF2E0f14f70f39B3782630761c27F724",
-      "token_symbol": "ANI",
-      "token_name": "ANI SISTER COMPANION",
-      "chain": "BASE",
-      "added_at": "2025-07-23T14:14:07.410209",
-      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
-      "score": 0.0,
-      "risk_level": "high",
-      "price_when_added": null,
-      "target_price": null,
-      "stop_loss": null,
-      "status": "watching",
-      "notes": "Generated recommendation: WATCH (NEUTRAL)",
-      "metadata": {
-        "liquidity_usd": 0.0,
-        "dex_name": "BaseSwap",
-        "social_score": 0.13333333333333333,
-        "confidence": null,
-        "action": null
-      },
-      "last_updated": "2025-07-23T14:14:07.410209"
-    },
-    {
       "token_address": "0xA3BF906704e621C0E1AB781C27ee7BAaca149bf1",
       "token_symbol": "LUNXAR",
       "token_name": "Lunxar AI",
@@ -3334,7 +3311,76 @@
         "action": null
       },
       "last_updated": "2025-07-23T14:19:43.719548"
+    },
+    {
+      "token_address": "0xa22B52b613CaDA2F7c97Ed6768E7E687e4eE5dAc",
+      "token_symbol": "CRYPTO",
+      "token_name": "CRYPTO",
+      "chain": "BASE",
+      "added_at": "2025-07-23T14:21:38.489282",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T14:21:38.489282"
+    },
+    {
+      "token_address": "0xc07aEAd108412cCda78FFFa136b284ba56b26b18",
+      "token_symbol": "COSMO",
+      "token_name": "cosmo",
+      "chain": "BASE",
+      "added_at": "2025-07-23T14:22:50.186565",
+      "reason": "Auto-added: Score 0.35, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.10666666666666667,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T14:22:50.186565"
+    },
+    {
+      "token_address": "0x28B3338E6FAd0Fd7Ca79270Ec17a2F2aB10CFd47",
+      "token_symbol": "JOE ROGAN",
+      "token_name": "JOE ROGAN",
+      "chain": "BASE",
+      "added_at": "2025-07-23T14:24:19.989301",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T14:24:19.989301"
     }
   ],
-  "last_saved": "2025-07-23T14:19:43.719548"
+  "last_saved": "2025-07-23T14:24:29.100819"
 }
