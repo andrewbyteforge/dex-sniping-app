@@ -3495,7 +3495,30 @@
         "action": null
       },
       "last_updated": "2025-07-23T16:20:04.378256"
+    },
+    {
+      "token_address": "0x5E8Bbd094cC71D5830F953bf3a2593a8664BF15D",
+      "token_symbol": "SLEEPLESS",
+      "token_name": "SLEEPLESS COIN",
+      "chain": "BASE",
+      "added_at": "2025-07-23T16:21:27.724268",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T16:21:27.724268"
     }
   ],
-  "last_saved": "2025-07-23T16:20:04.379267"
+  "last_saved": "2025-07-23T16:21:27.724268"
 }
