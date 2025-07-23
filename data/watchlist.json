@@ -3380,7 +3380,122 @@
         "action": null
       },
       "last_updated": "2025-07-23T14:24:19.989301"
+    },
+    {
+      "token_address": "0xD2d19BB5bb182fb8bEEF61B7258D679804BB4383",
+      "token_symbol": "STICKCOOK",
+      "token_name": "Stick Cook",
+      "chain": "BASE",
+      "added_at": "2025-07-23T14:40:36.468755",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T14:40:36.468755"
+    },
+    {
+      "token_address": "0xE2baFf879c7e5DEfCde91FCddf77486225363812",
+      "token_symbol": "J",
+      "token_name": "J",
+      "chain": "BASE",
+      "added_at": "2025-07-23T14:41:38.718811",
+      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.13333333333333333,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T14:41:38.718811"
+    },
+    {
+      "token_address": "0x94b86aAfE96Ffb7c08392870522418eF1f981938",
+      "token_symbol": "America Party",
+      "token_name": "America Party",
+      "chain": "BASE",
+      "added_at": "2025-07-23T16:14:13.698645",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T16:14:13.698645"
+    },
+    {
+      "token_address": "0xe82154818aB62F4c006dA0F21CE870a3Dc638Eda",
+      "token_symbol": "Wojak",
+      "token_name": "Wojak",
+      "chain": "ETHEREUM",
+      "added_at": "2025-07-23T16:16:46.410431",
+      "reason": "Auto-added: Score 0.45, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "low",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "Uniswap V2",
+        "social_score": 0.10666666666666667,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T16:16:46.410431"
+    },
+    {
+      "token_address": "0x284d03A8c63e3a9959D53431b7805A7f47703066",
+      "token_symbol": "MET",
+      "token_name": "MET",
+      "chain": "ETHEREUM",
+      "added_at": "2025-07-23T16:20:04.378256",
+      "reason": "Added from dashboard - 23/07/2025, 16:20:03",
+      "score": 0.0,
+      "risk_level": "medium",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Manual addition via web interface",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "Unknown",
+        "social_score": 0.0,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T16:20:04.378256"
     }
   ],
-  "last_saved": "2025-07-23T14:24:29.100819"
+  "last_saved": "2025-07-23T16:20:04.379267"
 }
