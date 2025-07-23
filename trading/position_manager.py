@@ -1,6 +1,9 @@
+#!/usr/bin/env python3
 """
-Position management system for tracking active trades and portfolio state.
-Handles position lifecycle, P&L calculation, and automated exit strategies.
+Enhanced position management system for tracking active trades and portfolio state.
+
+Handles position lifecycle, P&L calculation, automated exit strategies,
+and comprehensive portfolio analytics.
 """
 
 from typing import Dict, List, Optional, Tuple, Any
@@ -10,9 +13,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
 import json
+import uuid
 
 from models.token import TradingOpportunity
-from trading.risk_manager import RiskManager, PositionSizeResult
 from utils.logger import logger_manager
 
 
@@ -35,11 +38,13 @@ class ExitReason(Enum):
     TIME_LIMIT = "time_limit"
     EMERGENCY = "emergency"
     RISK_MANAGEMENT = "risk_management"
+    TRAILING_STOP = "trailing_stop"
+    SYSTEM_SHUTDOWN = "system_shutdown"
 
 
 @dataclass
 class Position:
-    """Represents an active trading position."""
+    """Represents an active trading position with comprehensive tracking."""
     id: str
     token_symbol: str
     token_address: str
@@ -68,6 +73,12 @@ class Position:
     exit_tx_hash: Optional[str] = None
     gas_fees_paid: Decimal = Decimal('0')
     
+    # Exit information
+    exit_time: Optional[datetime] = None
+    exit_price: Optional[Decimal] = None
+    exit_reason: Optional[ExitReason] = None
+    realized_pnl: Optional[Decimal] = None
+    
     # Additional metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -76,63 +87,73 @@ class Position:
         Update current price and recalculate P&L.
         
         Args:
-            new_price: New current market price
+            new_price: New current price
         """
         try:
             self.current_price = new_price
             self.last_update = datetime.now()
             
-            # Update price extremes
+            # Update highest/lowest prices
             if self.highest_price is None or new_price > self.highest_price:
                 self.highest_price = new_price
             if self.lowest_price is None or new_price < self.lowest_price:
                 self.lowest_price = new_price
-                
+            
             # Calculate unrealized P&L
             if self.entry_price > 0:
                 price_change = (new_price - self.entry_price) / self.entry_price
-                self.unrealized_pnl_percentage = float(price_change * 100)
                 self.unrealized_pnl = self.entry_amount * price_change
-                
-        except Exception:
-            # If calculation fails, keep existing values
-            pass
-    
-    def should_exit(self) -> Tuple[bool, Optional[ExitReason]]:
+                self.unrealized_pnl_percentage = float(price_change * 100)
+            
+            # Update trailing stop if applicable
+            if self.trailing_stop_distance and self.highest_price:
+                new_trailing_stop = self.highest_price - self.trailing_stop_distance
+                if self.stop_loss_price is None or new_trailing_stop > self.stop_loss_price:
+                    self.stop_loss_price = new_trailing_stop
+                    
+        except Exception as e:
+            logger = logger_manager.get_logger("Position")
+            logger.error(f"Error updating price for {self.token_symbol}: {e}")
+
+    def close_position(
+        self, 
+        exit_price: Decimal, 
+        exit_reason: ExitReason, 
+        exit_tx_hash: Optional[str] = None
+    ) -> None:
         """
-        Check if position should be exited based on current conditions.
+        Close the position and calculate final P&L.
         
-        Returns:
-            Tuple of (should_exit, exit_reason)
+        Args:
+            exit_price: Final exit price
+            exit_reason: Reason for position closure
+            exit_tx_hash: Transaction hash for exit
         """
         try:
-            # Check stop loss
-            if (self.stop_loss_price is not None and 
-                self.current_price <= self.stop_loss_price):
-                return True, ExitReason.STOP_LOSS
-                
-            # Check take profit
-            if (self.take_profit_price is not None and 
-                self.current_price >= self.take_profit_price):
-                return True, ExitReason.TAKE_PROFIT
-                
-            # Check time limit
-            if (self.max_hold_time is not None and 
-                datetime.now() - self.entry_time > self.max_hold_time):
-                return True, ExitReason.TIME_LIMIT
-                
-            # Check trailing stop
-            if (self.trailing_stop_distance is not None and 
-                self.highest_price is not None):
-                trailing_stop_price = self.highest_price - self.trailing_stop_distance
-                if self.current_price <= trailing_stop_price:
-                    return True, ExitReason.STOP_LOSS
-                    
-            return False, None
+            self.status = PositionStatus.CLOSED
+            self.exit_time = datetime.now()
+            self.exit_price = exit_price
+            self.exit_reason = exit_reason
+            self.exit_tx_hash = exit_tx_hash
             
-        except Exception:
-            return False, None
-    
+            # Calculate realized P&L
+            if self.entry_price > 0:
+                price_change = (exit_price - self.entry_price) / self.entry_price
+                self.realized_pnl = self.entry_amount * price_change
+                
+                # Update final unrealized P&L (now realized)
+                self.unrealized_pnl = self.realized_pnl
+                self.unrealized_pnl_percentage = float(price_change * 100)
+                
+        except Exception as e:
+            logger = logger_manager.get_logger("Position")
+            logger.error(f"Error closing position {self.token_symbol}: {e}")
+
+    def get_hold_time(self) -> timedelta:
+        """Get current hold time."""
+        end_time = self.exit_time if self.exit_time else datetime.now()
+        return end_time - self.entry_time
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert position to dictionary for serialization."""
         return {
@@ -146,75 +167,81 @@ class Position:
             'entry_time': self.entry_time.isoformat(),
             'last_update': self.last_update.isoformat(),
             'status': self.status.value,
-            'unrealized_pnl': str(self.unrealized_pnl),
-            'unrealized_pnl_percentage': self.unrealized_pnl_percentage,
             'stop_loss_price': str(self.stop_loss_price) if self.stop_loss_price else None,
             'take_profit_price': str(self.take_profit_price) if self.take_profit_price else None,
+            'unrealized_pnl': str(self.unrealized_pnl),
+            'unrealized_pnl_percentage': self.unrealized_pnl_percentage,
+            'highest_price': str(self.highest_price) if self.highest_price else None,
+            'lowest_price': str(self.lowest_price) if self.lowest_price else None,
             'entry_tx_hash': self.entry_tx_hash,
-            'gas_fees_paid': str(self.gas_fees_paid)
+            'exit_tx_hash': self.exit_tx_hash,
+            'exit_time': self.exit_time.isoformat() if self.exit_time else None,
+            'exit_price': str(self.exit_price) if self.exit_price else None,
+            'exit_reason': self.exit_reason.value if self.exit_reason else None,
+            'realized_pnl': str(self.realized_pnl) if self.realized_pnl else None,
+            'hold_time_seconds': self.get_hold_time().total_seconds(),
+            'metadata': self.metadata
         }
-
-
-@dataclass
-class PositionExit:
-    """Details of a position exit."""
-    position_id: str
-    exit_price: Decimal
-    exit_amount: Decimal
-    exit_time: datetime
-    exit_reason: ExitReason
-    realized_pnl: Decimal
-    realized_pnl_percentage: float
-    exit_tx_hash: Optional[str] = None
-    gas_fees: Decimal = Decimal('0')
 
 
 class PositionManager:
     """
-    Manages active trading positions and their lifecycle.
-    Handles position tracking, P&L calculation, and automated exits.
-    """
+    Enhanced position management system for tracking and managing trading positions.
     
-    def __init__(self, risk_manager: RiskManager) -> None:
-        """
-        Initialize the position manager.
-        
-        Args:
-            risk_manager: Risk management system instance
-        """
+    Features:
+    - Comprehensive position lifecycle management
+    - Real-time P&L calculation and tracking
+    - Automated exit condition monitoring
+    - Portfolio-level analytics and metrics
+    - Risk management integration
+    - Performance reporting and analytics
+    """
+
+    def __init__(self) -> None:
+        """Initialize the position manager."""
         self.logger = logger_manager.get_logger("PositionManager")
-        self.risk_manager = risk_manager
         
-        # Position tracking
+        # Position storage
         self.active_positions: Dict[str, Position] = {}
-        self.closed_positions: List[PositionExit] = []
+        self.closed_positions: Dict[str, Position] = {}
+        self.position_history: List[Position] = []
         
         # Performance tracking
-        self.total_realized_pnl = Decimal('0')
-        self.total_fees_paid = Decimal('0')
-        self.position_count = 0
-        self.winning_positions = 0
+        self.total_trades = 0
+        self.successful_trades = 0
+        self.total_pnl = Decimal('0')
+        self.daily_pnl = Decimal('0')
+        self.last_reset_date = datetime.now().date()
+        
+        # Risk tracking
+        self.max_concurrent_positions = 20
+        self.position_alerts: List[callable] = []
         
         # Monitoring
-        self.price_update_task: Optional[asyncio.Task] = None
         self.monitoring_active = False
-        
+        self.price_update_interval = 30  # seconds
+
     async def initialize(self) -> None:
-        """Initialize the position manager and start monitoring."""
+        """Initialize the position manager."""
         try:
             self.logger.info("Initializing position manager...")
             
-            # Start price monitoring
-            await self.start_monitoring()
+            # Load any persisted positions
+            await self._load_positions()
+            
+            # Start monitoring task
+            if not self.monitoring_active:
+                asyncio.create_task(self._monitoring_loop())
+                self.monitoring_active = True
             
             self.logger.info("Position manager initialized successfully")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize position manager: {e}")
             raise
-    
+
     async def open_position(
-        self, 
+        self,
         opportunity: TradingOpportunity,
         entry_price: Decimal,
         entry_amount: Decimal,
@@ -225,442 +252,350 @@ class PositionManager:
         
         Args:
             opportunity: Trading opportunity that triggered the position
-            entry_price: Price at which position was entered
-            entry_amount: Amount of tokens purchased
-            entry_tx_hash: Transaction hash of entry trade
+            entry_price: Entry price for the position
+            entry_amount: Amount invested in the position
+            entry_tx_hash: Transaction hash for entry
             
         Returns:
-            Position object if successful, None otherwise
+            Position: Created position object
         """
         try:
-            # Generate unique position ID
-            position_id = f"{opportunity.token.symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            # Get risk parameters from opportunity metadata
-            recommendation = opportunity.metadata.get('recommendation', {})
-            stop_loss_pct = recommendation.get('recommended_stop_loss', 0.15)
-            take_profit_pct = recommendation.get('recommended_take_profit', 0.30)
-            
-            # Calculate stop loss and take profit prices
-            stop_loss_price = entry_price * (Decimal('1') - Decimal(str(stop_loss_pct)))
-            take_profit_price = entry_price * (Decimal('1') + Decimal(str(take_profit_pct)))
+            # Check position limits
+            if len(self.active_positions) >= self.max_concurrent_positions:
+                self.logger.warning(f"Maximum concurrent positions reached: {len(self.active_positions)}")
+                return None
             
             # Create position
             position = Position(
-                id=position_id,
-                token_symbol=opportunity.token.symbol,
+                id=str(uuid.uuid4()),
+                token_symbol=opportunity.token.symbol or "UNKNOWN",
                 token_address=opportunity.token.address,
-                chain=opportunity.metadata.get('chain', 'ETHEREUM'),
+                chain=opportunity.chain,
                 entry_amount=entry_amount,
                 entry_price=entry_price,
                 current_price=entry_price,
                 entry_time=datetime.now(),
                 last_update=datetime.now(),
                 status=PositionStatus.OPEN,
-                stop_loss_price=stop_loss_price,
-                take_profit_price=take_profit_price,
-                max_hold_time=timedelta(hours=24),  # Default 24-hour max hold
                 entry_tx_hash=entry_tx_hash,
                 metadata={
-                    'opportunity_id': opportunity.metadata.get('opportunity_id'),
+                    'opportunity_id': getattr(opportunity, 'id', None),
                     'dex_name': opportunity.liquidity.dex_name,
-                    'risk_score': recommendation.get('score', 0.0)
+                    'liquidity_usd': opportunity.liquidity.liquidity_usd
                 }
             )
             
-            # Add to active positions
-            self.active_positions[position_id] = position
-            self.position_count += 1
+            # Initialize price tracking
+            position.update_current_price(entry_price)
             
-            # Update risk manager
-            self.risk_manager.add_position(opportunity.token.symbol, entry_amount)
+            # Store position
+            self.active_positions[position.id] = position
             
-            self.logger.info(
-                f"Position opened: {position.token_symbol} - "
-                f"Amount: {entry_amount}, Price: ${entry_price}, "
-                f"Stop Loss: ${stop_loss_price:.6f}, Take Profit: ${take_profit_price:.6f}"
-            )
+            # Update statistics
+            self.total_trades += 1
+            self._check_daily_reset()
+            
+            # Send alert
+            await self._send_position_alert("POSITION_OPENED", position)
+            
+            self.logger.info(f"Position opened: {position.token_symbol} (ID: {position.id[:8]})")
             
             return position
             
         except Exception as e:
-            self.logger.error(f"Failed to open position for {opportunity.token.symbol}: {e}")
+            self.logger.error(f"Error opening position: {e}")
             return None
-    
+
     async def close_position(
-        self, 
-        position_id: str, 
-        exit_price: Decimal,
-        exit_reason: ExitReason,
+        self,
+        position_id: str,
+        exit_reason: str,
+        exit_price: Optional[Decimal] = None,
         exit_tx_hash: Optional[str] = None
-    ) -> Optional[PositionExit]:
+    ) -> bool:
         """
         Close an active position.
         
         Args:
             position_id: ID of position to close
-            exit_price: Price at which position was exited
             exit_reason: Reason for closing position
-            exit_tx_hash: Transaction hash of exit trade
+            exit_price: Exit price (uses current price if not provided)
+            exit_tx_hash: Transaction hash for exit
             
         Returns:
-            PositionExit object if successful, None otherwise
+            bool: True if position was successfully closed
         """
         try:
             if position_id not in self.active_positions:
-                self.logger.warning(f"Attempted to close non-existent position: {position_id}")
-                return None
-                
+                self.logger.warning(f"Position not found: {position_id}")
+                return False
+            
             position = self.active_positions[position_id]
             
-            # Calculate realized P&L
-            price_change = (exit_price - position.entry_price) / position.entry_price
-            realized_pnl = position.entry_amount * price_change
-            realized_pnl_percentage = float(price_change * 100)
+            # Use current price if exit price not provided
+            if exit_price is None:
+                exit_price = position.current_price
             
-            # Create exit record
-            position_exit = PositionExit(
-                position_id=position_id,
-                exit_price=exit_price,
-                exit_amount=position.entry_amount,
-                exit_time=datetime.now(),
-                exit_reason=exit_reason,
-                realized_pnl=realized_pnl,
-                realized_pnl_percentage=realized_pnl_percentage,
-                exit_tx_hash=exit_tx_hash
-            )
+            # Convert exit reason string to enum
+            try:
+                exit_reason_enum = ExitReason(exit_reason.lower())
+            except ValueError:
+                exit_reason_enum = ExitReason.MANUAL
             
-            # Update position status
-            if exit_reason == ExitReason.STOP_LOSS:
-                position.status = PositionStatus.STOP_LOSS_TRIGGERED
-            elif exit_reason == ExitReason.TAKE_PROFIT:
-                position.status = PositionStatus.TAKE_PROFIT_TRIGGERED
-            else:
-                position.status = PositionStatus.CLOSED
-                
-            # Update performance tracking
-            self.total_realized_pnl += realized_pnl
-            if realized_pnl > 0:
-                self.winning_positions += 1
-                
-            # Update risk manager P&L
-            self.risk_manager.update_daily_pnl(float(realized_pnl))
-            self.risk_manager.remove_position(position.token_symbol)
+            # Close the position
+            position.close_position(exit_price, exit_reason_enum, exit_tx_hash)
             
             # Move to closed positions
-            self.closed_positions.append(position_exit)
+            self.closed_positions[position_id] = position
+            self.position_history.append(position)
             del self.active_positions[position_id]
             
-            self.logger.info(
-                f"Position closed: {position.token_symbol} - "
-                f"Exit Price: ${exit_price}, P&L: {realized_pnl:.6f} ({realized_pnl_percentage:.2f}%), "
-                f"Reason: {exit_reason.value}"
-            )
+            # Update statistics
+            if position.realized_pnl and position.realized_pnl > 0:
+                self.successful_trades += 1
             
-            return position_exit
+            if position.realized_pnl:
+                self.total_pnl += position.realized_pnl
+                self.daily_pnl += position.realized_pnl
+            
+            # Send alert
+            await self._send_position_alert("POSITION_CLOSED", position)
+            
+            pnl_str = f"${float(position.realized_pnl):.2f}" if position.realized_pnl else "N/A"
+            self.logger.info(f"Position closed: {position.token_symbol} - PnL: {pnl_str} ({exit_reason})")
+            
+            return True
             
         except Exception as e:
-            self.logger.error(f"Failed to close position {position_id}: {e}")
-            return None
-    
-    async def update_position_prices(self) -> None:
-        """Update current prices for all active positions."""
-        try:
-            if not self.active_positions:
-                return
-                
-            for position_id, position in self.active_positions.items():
-                try:
-                    # Get current price (placeholder - would integrate with price feeds)
-                    current_price = await self._get_current_price(position)
-                    
-                    if current_price:
-                        position.update_current_price(current_price)
-                        
-                        # Check if position should be exited
-                        should_exit, exit_reason = position.should_exit()
-                        if should_exit:
-                            self.logger.info(
-                                f"Auto-exit triggered for {position.token_symbol}: {exit_reason.value}"
-                            )
-                            
-                            # Execute exit (placeholder - would integrate with trading engine)
-                            await self._execute_position_exit(position, exit_reason)
-                            
-                except Exception as e:
-                    self.logger.error(f"Error updating position {position_id}: {e}")
-                    continue
-                    
-        except Exception as e:
-            self.logger.error(f"Position price update failed: {e}")
-    
-    async def _get_current_price(self, position: Position) -> Optional[Decimal]:
+            self.logger.error(f"Error closing position {position_id}: {e}")
+            return False
+
+    async def update_position(self, position: Position) -> bool:
         """
-        Get current market price for a position's token.
+        Update an existing position with new data.
         
         Args:
-            position: Position to get price for
+            position: Updated position object
             
         Returns:
-            Current price or None if unavailable
+            bool: True if update was successful
         """
         try:
-            # Placeholder implementation
-            # In production, this would integrate with:
-            # - DEX price feeds
-            # - CoinGecko API
-            # - Chain-specific price oracles
-            
-            # Simulate price movement for testing
-            import random
-            price_change = random.uniform(-0.05, 0.05)  # ±5% random movement
-            new_price = position.current_price * (Decimal('1') + Decimal(str(price_change)))
-            
-            return new_price.quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get current price for {position.token_symbol}: {e}")
-            return None
-    
-    async def _execute_position_exit(self, position: Position, exit_reason: ExitReason) -> None:
-        """
-        Execute the exit of a position.
-        
-        Args:
-            position: Position to exit
-            exit_reason: Reason for exit
-        """
-        try:
-            # Placeholder for actual trade execution
-            # In production, this would integrate with the execution engine
-            
-            exit_price = position.current_price
-            await self.close_position(position.id, exit_price, exit_reason)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to execute exit for position {position.id}: {e}")
-    
-    async def start_monitoring(self) -> None:
-        """Start position monitoring task."""
-        try:
-            if self.monitoring_active:
-                return
-                
-            self.monitoring_active = True
-            self.price_update_task = asyncio.create_task(self._monitoring_loop())
-            
-            self.logger.info("Position monitoring started")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to start position monitoring: {e}")
-            raise
-    
-    async def stop_monitoring(self) -> None:
-        """Stop position monitoring task."""
-        try:
-            self.monitoring_active = False
-            
-            if self.price_update_task:
-                self.price_update_task.cancel()
-                try:
-                    await self.price_update_task
-                except asyncio.CancelledError:
-                    pass
-                    
-            self.logger.info("Position monitoring stopped")
-            
-        except Exception as e:
-            self.logger.error(f"Error stopping position monitoring: {e}")
-    
-    async def _monitoring_loop(self) -> None:
-        """Main monitoring loop for position updates."""
-        try:
-            while self.monitoring_active:
-                await self.update_position_prices()
-                await asyncio.sleep(30)  # Update every 30 seconds
-                
-        except asyncio.CancelledError:
-            self.logger.info("Position monitoring loop cancelled")
-        except Exception as e:
-            self.logger.error(f"Position monitoring loop error: {e}")
-    
-    def get_portfolio_summary(self) -> Dict[str, Any]:
-        """
-        Get comprehensive portfolio summary.
-        
-        Returns:
-            Dictionary containing portfolio performance metrics
-        """
-        try:
-            # Calculate current unrealized P&L
-            total_unrealized_pnl = sum(
-                pos.unrealized_pnl for pos in self.active_positions.values()
-            )
-            
-            # Calculate win rate
-            total_closed = len(self.closed_positions)
-            win_rate = (self.winning_positions / total_closed * 100) if total_closed > 0 else 0
-            
-            # Calculate average hold time
-            if self.closed_positions:
-                total_hold_time = sum(
-                    (exit.exit_time - self.active_positions.get(exit.position_id, Position(
-                        id="", token_symbol="", token_address="", chain="",
-                        entry_amount=Decimal('0'), entry_price=Decimal('0'),
-                        current_price=Decimal('0'), entry_time=exit.exit_time,
-                        last_update=exit.exit_time, status=PositionStatus.CLOSED
-                    )).entry_time).total_seconds()
-                    for exit in self.closed_positions
-                )
-                avg_hold_time_seconds = total_hold_time / len(self.closed_positions)
-                avg_hold_time = str(timedelta(seconds=avg_hold_time_seconds))
+            if position.id in self.active_positions:
+                self.active_positions[position.id] = position
+                return True
             else:
-                avg_hold_time = "N/A"
+                self.logger.warning(f"Cannot update non-existent position: {position.id}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error updating position: {e}")
+            return False
+
+    def get_active_positions(self) -> List[Position]:
+        """
+        Get all active positions.
+        
+        Returns:
+            List of active Position objects
+        """
+        return list(self.active_positions.values())
+
+    def get_position(self, position_id: str) -> Optional[Position]:
+        """
+        Get a specific position by ID.
+        
+        Args:
+            position_id: ID of position to retrieve
             
-            return {
-                'active_positions': len(self.active_positions),
-                'total_positions_opened': self.position_count,
-                'closed_positions': len(self.closed_positions),
-                'winning_positions': self.winning_positions,
-                'win_rate_percentage': round(win_rate, 2),
-                'total_realized_pnl': float(self.total_realized_pnl),
-                'total_unrealized_pnl': float(total_unrealized_pnl),
-                'total_pnl': float(self.total_realized_pnl + total_unrealized_pnl),
-                'total_fees_paid': float(self.total_fees_paid),
-                'average_hold_time': avg_hold_time,
-                'positions_by_status': self._get_positions_by_status(),
-                'top_performers': self._get_top_performers(),
-                'worst_performers': self._get_worst_performers()
+        Returns:
+            Position object if found, None otherwise
+        """
+        return self.active_positions.get(position_id) or self.closed_positions.get(position_id)
+
+    def get_total_exposure_usd(self) -> float:
+        """
+        Calculate total portfolio exposure in USD.
+        
+        Returns:
+            Total exposure value in USD
+        """
+        try:
+            total_exposure = 0.0
+            
+            for position in self.active_positions.values():
+                # Simplified calculation - would use actual token prices in production
+                position_value_usd = float(position.entry_amount) * float(position.current_price)
+                total_exposure += position_value_usd
+            
+            return total_exposure
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating total exposure: {e}")
+            return 0.0
+
+    def get_daily_pnl(self) -> float:
+        """
+        Get daily profit/loss.
+        
+        Returns:
+            Daily P&L in USD
+        """
+        self._check_daily_reset()
+        return float(self.daily_pnl)
+
+    async def check_exit_conditions(self) -> List[Position]:
+        """
+        Check all active positions for exit conditions.
+        
+        Returns:
+            List of positions that should be exited
+        """
+        positions_to_exit = []
+        
+        try:
+            for position in self.active_positions.values():
+                should_exit, reason = self._should_exit_position(position)
+                if should_exit:
+                    position.metadata['exit_reason'] = reason
+                    positions_to_exit.append(position)
+            
+            return positions_to_exit
+            
+        except Exception as e:
+            self.logger.error(f"Error checking exit conditions: {e}")
+            return []
+
+    def _should_exit_position(self, position: Position) -> Tuple[bool, str]:
+        """
+        Check if a position should be exited based on its parameters.
+        
+        Args:
+            position: Position to check
+            
+        Returns:
+            Tuple of (should_exit, reason)
+        """
+        try:
+            # Check stop loss
+            if position.stop_loss_price and position.current_price <= position.stop_loss_price:
+                return True, "stop_loss"
+            
+            # Check take profit
+            if position.take_profit_price and position.current_price >= position.take_profit_price:
+                return True, "take_profit"
+            
+            # Check maximum hold time
+            if position.max_hold_time:
+                hold_time = position.get_hold_time()
+                if hold_time >= position.max_hold_time:
+                    return True, "time_limit"
+            
+            # Check for emergency conditions (large unrealized loss)
+            if position.unrealized_pnl_percentage < -50:  # 50% loss
+                return True, "emergency"
+            
+            return False, ""
+            
+        except Exception as e:
+            self.logger.error(f"Error checking exit condition for {position.token_symbol}: {e}")
+            return False, "error"
+
+    async def _monitoring_loop(self) -> None:
+        """Main monitoring loop for position management."""
+        self.logger.info("Starting position monitoring loop")
+        
+        while self.monitoring_active:
+            try:
+                # Check exit conditions
+                positions_to_exit = await self.check_exit_conditions()
+                
+                for position in positions_to_exit:
+                    await self._send_position_alert("EXIT_CONDITION_MET", position)
+                
+                # Update position metrics
+                await self._update_position_metrics()
+                
+                await asyncio.sleep(self.price_update_interval)
+                
+            except asyncio.CancelledError:
+                self.logger.info("Position monitoring loop cancelled")
+                break
+            except Exception as e:
+                self.logger.error(f"Error in position monitoring loop: {e}")
+                await asyncio.sleep(60)
+
+    async def _update_position_metrics(self) -> None:
+        """Update position-level metrics and performance data."""
+        try:
+            # This would typically fetch current prices from exchanges
+            # For now, simulate small price movements for demo purposes
+            for position in self.active_positions.values():
+                if position.metadata.get('paper_trade', False):
+                    # Simulate random price movement for paper trades
+                    import random
+                    price_change = random.uniform(-0.02, 0.02)  # ±2% movement
+                    new_price = position.current_price * (1 + Decimal(str(price_change)))
+                    position.update_current_price(new_price)
+                
+        except Exception as e:
+            self.logger.error(f"Error updating position metrics: {e}")
+
+    async def _send_position_alert(self, alert_type: str, position: Position) -> None:
+        """
+        Send position alert to registered callbacks.
+        
+        Args:
+            alert_type: Type of alert
+            position: Position object
+        """
+        try:
+            alert_data = {
+                'type': alert_type,
+                'timestamp': datetime.now().isoformat(),
+                'position': position.to_dict()
             }
             
-        except Exception as e:
-            self.logger.error(f"Failed to generate portfolio summary: {e}")
-            return {}
-    
-    def _get_positions_by_status(self) -> Dict[str, int]:
-        """Get count of positions by status."""
-        status_counts = {}
-        
-        for position in self.active_positions.values():
-            status = position.status.value
-            status_counts[status] = status_counts.get(status, 0) + 1
-            
-        return status_counts
-    
-    def _get_top_performers(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Get top performing closed positions."""
-        try:
-            sorted_exits = sorted(
-                self.closed_positions,
-                key=lambda x: x.realized_pnl_percentage,
-                reverse=True
-            )
-            
-            return [
-                {
-                    'token_symbol': self._get_position_symbol(exit.position_id),
-                    'realized_pnl_percentage': exit.realized_pnl_percentage,
-                    'realized_pnl': float(exit.realized_pnl),
-                    'exit_reason': exit.exit_reason.value
-                }
-                for exit in sorted_exits[:limit]
-            ]
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get top performers: {e}")
-            return []
-    
-    def _get_worst_performers(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """Get worst performing closed positions."""
-        try:
-            sorted_exits = sorted(
-                self.closed_positions,
-                key=lambda x: x.realized_pnl_percentage
-            )
-            
-            return [
-                {
-                    'token_symbol': self._get_position_symbol(exit.position_id),
-                    'realized_pnl_percentage': exit.realized_pnl_percentage,
-                    'realized_pnl': float(exit.realized_pnl),
-                    'exit_reason': exit.exit_reason.value
-                }
-                for exit in sorted_exits[:limit]
-            ]
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get worst performers: {e}")
-            return []
-    
-    def _get_position_symbol(self, position_id: str) -> str:
-        """Extract token symbol from position ID."""
-        try:
-            return position_id.split('_')[0]
-        except Exception:
-            return "UNKNOWN"
-    
-    def get_position_details(self, position_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get detailed information about a specific position.
-        
-        Args:
-            position_id: ID of position to get details for
-            
-        Returns:
-            Position details dictionary or None if not found
-        """
-        try:
-            if position_id in self.active_positions:
-                return self.active_positions[position_id].to_dict()
-            else:
-                # Check closed positions
-                for exit in self.closed_positions:
-                    if exit.position_id == position_id:
-                        return {
-                            'position_id': exit.position_id,
-                            'status': 'closed',
-                            'exit_price': str(exit.exit_price),
-                            'exit_time': exit.exit_time.isoformat(),
-                            'exit_reason': exit.exit_reason.value,
-                            'realized_pnl': str(exit.realized_pnl),
-                            'realized_pnl_percentage': exit.realized_pnl_percentage
-                        }
-                        
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get position details for {position_id}: {e}")
-            return None
-    
-    async def emergency_close_all(self) -> List[str]:
-        """
-        Emergency close all active positions.
-        
-        Returns:
-            List of position IDs that were closed
-        """
-        try:
-            self.logger.warning("Emergency close all positions triggered")
-            
-            closed_positions = []
-            
-            for position_id, position in list(self.active_positions.items()):
+            # Send to all registered callbacks
+            for callback in self.position_alerts:
                 try:
-                    exit_result = await self.close_position(
-                        position_id,
-                        position.current_price,
-                        ExitReason.EMERGENCY
-                    )
-                    
-                    if exit_result:
-                        closed_positions.append(position_id)
-                        
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(alert_data)
+                    else:
+                        callback(alert_data)
                 except Exception as e:
-                    self.logger.error(f"Failed to emergency close position {position_id}: {e}")
+                    self.logger.error(f"Error in position alert callback: {e}")
                     
-            self.logger.warning(f"Emergency close completed: {len(closed_positions)} positions closed")
-            return closed_positions
+        except Exception as e:
+            self.logger.error(f"Error sending position alert: {e}")
+
+    def _check_daily_reset(self) -> None:
+        """Check if daily counters need to be reset."""
+        current_date = datetime.now().date()
+        if current_date > self.last_reset_date:
+            self.daily_pnl = Decimal('0')
+            self.last_reset_date = current_date
+            self.logger.debug("Daily P&L counter reset")
+
+    async def _load_positions(self) -> None:
+        """Load persisted positions from storage."""
+        try:
+            # In a real implementation, this would load from database or file
+            # For now, just log that we're ready to load
+            self.logger.debug("Position persistence not implemented - starting with empty portfolio")
             
         except Exception as e:
-            self.logger.error(f"Emergency close all failed: {e}")
-            return []
+            self.logger.error(f"Error loading positions: {e}")
+
+    async def cleanup(self) -> None:
+        """Cleanup position manager resources."""
+        try:
+            self.logger.info("Cleaning up position manager...")
+            
+            # Stop monitoring
+            self.monitoring_active = False
+            
+            self.logger.info("Position manager cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error during position manager cleanup: {e}")

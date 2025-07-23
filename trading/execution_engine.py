@@ -1,70 +1,97 @@
+#!/usr/bin/env python3
 """
-Trade execution engine for interacting with DEXs and executing trades.
-Handles order placement, transaction monitoring, and execution confirmation.
+Basic execution engine for automated trading with comprehensive error handling.
+
+Handles order placement, transaction monitoring, and execution confirmation
+with support for both paper trading and live execution.
 """
 
 from typing import Dict, List, Optional, Tuple, Any
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
 import json
-from web3 import Web3
-from web3.contract import Contract
 
 from models.token import TradingOpportunity
-from trading.risk_manager import RiskManager, PositionSizeResult
-from trading.position_manager import PositionManager, Position
-from trading.executor import TradeOrder, TradeType, TradeStatus, OrderType
+from trading.risk_manager import PositionSizeResult
+from trading.position_manager import Position, PositionStatus
 from utils.logger import logger_manager
 
 
-class ExecutionResult(Enum):
-    """Result of trade execution attempt."""
-    SUCCESS = "success"
+class OrderType(Enum):
+    """Types of trading orders."""
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderStatus(Enum):
+    """Status of trading orders."""
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    CONFIRMED = "confirmed"
     FAILED = "failed"
-    INSUFFICIENT_FUNDS = "insufficient_funds"
-    SLIPPAGE_EXCEEDED = "slippage_exceeded"
-    GAS_ESTIMATION_FAILED = "gas_estimation_failed"
-    TRANSACTION_FAILED = "transaction_failed"
-    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
 
 
 @dataclass
-class ExecutionParams:
-    """Parameters for trade execution."""
+class TradeOrder:
+    """Represents a trading order."""
+    id: str
+    order_type: OrderType
     token_address: str
-    amount_in: Decimal
-    min_amount_out: Decimal
-    slippage_tolerance: float
-    gas_price: Optional[int] = None
+    token_symbol: str
+    chain: str
+    amount: Decimal
+    target_price: Optional[Decimal]
+    status: OrderStatus
+    created_time: datetime
+    submitted_time: Optional[datetime] = None
+    confirmed_time: Optional[datetime] = None
+    tx_hash: Optional[str] = None
     gas_limit: Optional[int] = None
-    deadline_minutes: int = 20
+    gas_price: Optional[int] = None
+    metadata: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
 
 
 @dataclass
 class ExecutionResult:
-    """Result of a trade execution."""
+    """Result of trade execution."""
     success: bool
-    tx_hash: Optional[str] = None
-    amount_in: Optional[Decimal] = None
-    amount_out: Optional[Decimal] = None
-    actual_price: Optional[Decimal] = None
-    gas_used: Optional[int] = None
-    gas_price: Optional[int] = None
-    execution_time: Optional[float] = None
+    order_id: str
+    tx_hash: Optional[str]
+    amount_in: Decimal
+    amount_out: Decimal
+    actual_price: Decimal
+    gas_used: Optional[int]
+    gas_cost: Decimal
+    execution_time: datetime
     error_message: Optional[str] = None
-    slippage_actual: Optional[float] = None
+    metadata: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
 
 
 class ExecutionEngine:
     """
-    Production trade execution engine for DEX interactions.
-    Handles order placement, transaction monitoring, and execution confirmation.
-    """
+    Basic execution engine for automated trading.
     
-    def __init__(self, risk_manager: RiskManager, position_manager: PositionManager) -> None:
+    Handles:
+    - Order creation and submission
+    - Transaction monitoring and confirmation
+    - Paper trading simulation
+    - Gas optimization (basic)
+    - Error handling and retry logic
+    """
+
+    def __init__(self, risk_manager, position_manager) -> None:
         """
         Initialize the execution engine.
         
@@ -76,11 +103,7 @@ class ExecutionEngine:
         self.risk_manager = risk_manager
         self.position_manager = position_manager
         
-        # Web3 connections by chain
-        self.web3_connections: Dict[str, Web3] = {}
-        self.dex_contracts: Dict[str, Dict[str, Contract]] = {}
-        
-        # Execution tracking
+        # Order tracking
         self.pending_orders: Dict[str, TradeOrder] = {}
         self.execution_history: List[ExecutionResult] = []
         
@@ -94,27 +117,28 @@ class ExecutionEngine:
         self.max_concurrent_orders = 10
         self.transaction_timeout = 300  # 5 minutes
         self.monitoring_active = False
+        self.paper_trading_mode = True  # Default to paper trading
         
+        # Simulated execution parameters
+        self.simulation_success_rate = 0.95  # 95% success rate for paper trades
+        self.simulation_slippage = 0.005  # 0.5% average slippage
+
     async def initialize(self) -> None:
-        """Initialize the execution engine and Web3 connections."""
+        """Initialize the execution engine."""
         try:
             self.logger.info("Initializing execution engine...")
             
-            # Initialize Web3 connections
-            await self._initialize_web3_connections()
-            
-            # Initialize DEX contracts
-            await self._initialize_dex_contracts()
-            
             # Start transaction monitoring
-            await self._start_monitoring()
+            if not self.monitoring_active:
+                asyncio.create_task(self._monitoring_loop())
+                self.monitoring_active = True
             
             self.logger.info("Execution engine initialized successfully")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize execution engine: {e}")
             raise
-    
+
     async def execute_buy_order(
         self, 
         opportunity: TradingOpportunity,
@@ -135,7 +159,8 @@ class ExecutionEngine:
                 self.logger.warning(f"Buy order rejected: {opportunity.token.symbol} - No approved amount")
                 return None
                 
-            self.logger.info(f"Executing buy order: {opportunity.token.symbol}")
+            token_symbol = opportunity.token.symbol or "UNKNOWN"
+            self.logger.info(f"🔥 Executing buy order: {token_symbol}")
             
             # Create trade order
             order = self._create_buy_order(opportunity, risk_assessment)
@@ -152,22 +177,38 @@ class ExecutionEngine:
                     entry_tx_hash=execution_result.tx_hash
                 )
                 
+                if position:
+                    # Set up risk management parameters
+                    if risk_assessment.recommended_stop_loss:
+                        stop_loss_price = execution_result.actual_price * (1 - Decimal(str(risk_assessment.recommended_stop_loss)))
+                        position.stop_loss_price = stop_loss_price
+                    
+                    if risk_assessment.recommended_take_profit:
+                        take_profit_price = execution_result.actual_price * (1 + Decimal(str(risk_assessment.recommended_take_profit)))
+                        position.take_profit_price = take_profit_price
+                    
+                    if risk_assessment.max_hold_time_hours:
+                        position.max_hold_time = timedelta(hours=risk_assessment.max_hold_time_hours)
+                    
+                    # Update position in manager
+                    await self.position_manager.update_position(position)
+                
                 self.logger.info(
-                    f"Buy order successful: {opportunity.token.symbol} - "
+                    f"✅ Buy order successful: {token_symbol} - "
                     f"TX: {execution_result.tx_hash}, Position: {position.id if position else 'Failed'}"
                 )
                 
                 return position
             else:
                 self.logger.error(
-                    f"Buy order failed: {opportunity.token.symbol} - {execution_result.error_message}"
+                    f"❌ Buy order failed: {token_symbol} - {execution_result.error_message}"
                 )
                 return None
                 
         except Exception as e:
             self.logger.error(f"Buy order execution failed for {opportunity.token.symbol}: {e}")
             return None
-    
+
     async def execute_sell_order(self, position: Position) -> bool:
         """
         Execute a sell order to close a position.
@@ -176,40 +217,61 @@ class ExecutionEngine:
             position: Position to close
             
         Returns:
-            True if successful, False otherwise
+            bool: True if successful, False otherwise
         """
         try:
-            self.logger.info(f"Executing sell order: {position.token_symbol}")
+            self.logger.info(f"🚪 Executing sell order: {position.token_symbol}")
             
             # Create sell order
             order = self._create_sell_order(position)
             
-            # Execute the trade
-            execution_result = await self._execute_order(order)
+            # Create dummy opportunity for sell execution
+            from models.token import TokenInfo, LiquidityInfo
+            
+            token_info = TokenInfo(
+                address=position.token_address,
+                symbol=position.token_symbol,
+                name=position.token_symbol,
+                decimals=18,
+                price=position.current_price
+            )
+            
+            liquidity_info = LiquidityInfo(
+                liquidity_usd=10000,  # Assume sufficient liquidity
+                dex_name="DEX",
+                pair_address=""
+            )
+            
+            sell_opportunity = TradingOpportunity(
+                token=token_info,
+                liquidity=liquidity_info,
+                timestamp=datetime.now(),
+                chain=position.chain,
+                metadata={'sell_order': True}
+            )
+            
+            # Execute the sell order
+            execution_result = await self._execute_order(order, sell_opportunity)
             
             if execution_result.success:
-                # Close position
-                await self.position_manager.close_position(
-                    position_id=position.id,
-                    exit_price=execution_result.actual_price,
-                    exit_reason=position_manager.ExitReason.MANUAL,
-                    exit_tx_hash=execution_result.tx_hash
-                )
+                # Update position with exit information
+                position.exit_tx_hash = execution_result.tx_hash
+                position.status = PositionStatus.CLOSED
                 
                 self.logger.info(
-                    f"Sell order successful: {position.token_symbol} - TX: {execution_result.tx_hash}"
+                    f"✅ Sell order successful: {position.token_symbol} - TX: {execution_result.tx_hash}"
                 )
                 return True
             else:
                 self.logger.error(
-                    f"Sell order failed: {position.token_symbol} - {execution_result.error_message}"
+                    f"❌ Sell order failed: {position.token_symbol} - {execution_result.error_message}"
                 )
                 return False
                 
         except Exception as e:
             self.logger.error(f"Sell order execution failed for {position.token_symbol}: {e}")
             return False
-    
+
     def _create_buy_order(
         self, 
         opportunity: TradingOpportunity, 
@@ -220,31 +282,31 @@ class ExecutionEngine:
         
         Args:
             opportunity: Trading opportunity
-            risk_assessment: Risk assessment with position sizing
+            risk_assessment: Risk assessment result
             
         Returns:
-            TradeOrder ready for execution
+            TradeOrder: Created buy order
         """
-        try:
-            order_id = f"BUY_{opportunity.token.symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            return TradeOrder(
-                id=order_id,
-                opportunity_id=opportunity.metadata.get('opportunity_id', ''),
-                trade_type=TradeType.BUY,
-                order_type=OrderType.MARKET,
-                token_address=opportunity.token.address,
-                token_symbol=opportunity.token.symbol,
-                chain=opportunity.metadata.get('chain', 'ETHEREUM'),
-                amount=risk_assessment.approved_amount,
-                slippage=0.05,  # 5% default slippage
-                status=TradeStatus.PENDING
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create buy order: {e}")
-            raise
-    
+        import uuid
+        
+        return TradeOrder(
+            id=str(uuid.uuid4()),
+            order_type=OrderType.BUY,
+            token_address=opportunity.token.address,
+            token_symbol=opportunity.token.symbol or "UNKNOWN",
+            chain=opportunity.chain,
+            amount=risk_assessment.approved_amount,
+            target_price=opportunity.token.price,
+            status=OrderStatus.PENDING,
+            created_time=datetime.now(),
+            metadata={
+                'risk_score': risk_assessment.risk_score,
+                'confidence_score': risk_assessment.confidence_score,
+                'max_loss_usd': risk_assessment.max_loss_usd,
+                'dex_name': opportunity.liquidity.dex_name
+            }
+        )
+
     def _create_sell_order(self, position: Position) -> TradeOrder:
         """
         Create a sell order from position.
@@ -253,307 +315,384 @@ class ExecutionEngine:
             position: Position to close
             
         Returns:
-            TradeOrder ready for execution
+            TradeOrder: Created sell order
         """
-        try:
-            order_id = f"SELL_{position.token_symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            return TradeOrder(
-                id=order_id,
-                opportunity_id=position.id,
-                trade_type=TradeType.SELL,
-                order_type=OrderType.MARKET,
-                token_address=position.token_address,
-                token_symbol=position.token_symbol,
-                chain=position.chain,
-                amount=position.entry_amount,
-                slippage=0.05,  # 5% default slippage
-                status=TradeStatus.PENDING
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create sell order: {e}")
-            raise
-    
+        import uuid
+        
+        return TradeOrder(
+            id=str(uuid.uuid4()),
+            order_type=OrderType.SELL,
+            token_address=position.token_address,
+            token_symbol=position.token_symbol,
+            chain=position.chain,
+            amount=position.entry_amount,
+            target_price=position.current_price,
+            status=OrderStatus.PENDING,
+            created_time=datetime.now(),
+            metadata={
+                'position_id': position.id,
+                'entry_price': str(position.entry_price),
+                'current_pnl': str(position.unrealized_pnl)
+            }
+        )
+
     async def _execute_order(
         self, 
         order: TradeOrder, 
-        opportunity: Optional[TradingOpportunity] = None
+        opportunity: TradingOpportunity
     ) -> ExecutionResult:
         """
-        Execute a trade order on the appropriate DEX.
+        Execute a trading order.
         
         Args:
-            order: Trade order to execute
-            opportunity: Optional trading opportunity for additional context
+            order: Trading order to execute
+            opportunity: Associated trading opportunity
             
         Returns:
-            ExecutionResult with execution details
+            ExecutionResult: Result of execution
         """
         try:
-            start_time = datetime.now()
-            order.status = TradeStatus.EXECUTING
-            
-            self.logger.debug(f"Executing order: {order.id}")
-            
-            # Get chain-specific execution
-            if order.chain.upper() in ['ETHEREUM', 'BASE']:
-                result = await self._execute_evm_order(order, opportunity)
-            elif 'SOLANA' in order.chain.upper():
-                result = await self._execute_solana_order(order, opportunity)
-            else:
-                result = ExecutionResult(
-                    success=False,
-                    error_message=f"Unsupported chain: {order.chain}"
-                )
-            
-            # Update execution metrics
-            execution_time = (datetime.now() - start_time).total_seconds()
-            result.execution_time = execution_time
-            
             self.total_executions += 1
-            if result.success:
-                self.successful_executions += 1
-                order.status = TradeStatus.COMPLETED
-                order.executed_at = datetime.now()
-                order.tx_hash = result.tx_hash
-            else:
-                order.status = TradeStatus.FAILED
-                order.error_message = result.error_message
+            execution_start = datetime.now()
             
-            # Update average execution time
+            # Add to pending orders
+            self.pending_orders[order.id] = order
+            order.status = OrderStatus.SUBMITTED
+            order.submitted_time = execution_start
+            
+            self.logger.debug(f"Executing {order.order_type.value} order: {order.token_symbol}")
+            
+            # Execute based on mode
+            if self.paper_trading_mode or order.metadata.get('paper_trade', False):
+                result = await self._simulate_execution(order, opportunity)
+            else:
+                result = await self._execute_live_order(order, opportunity)
+            
+            # Update order status
+            if result.success:
+                order.status = OrderStatus.CONFIRMED
+                order.confirmed_time = datetime.now()
+                order.tx_hash = result.tx_hash
+                self.successful_executions += 1
+            else:
+                order.status = OrderStatus.FAILED
+            
+            # Remove from pending orders
+            if order.id in self.pending_orders:
+                del self.pending_orders[order.id]
+            
+            # Add to execution history
+            self.execution_history.append(result)
+            
+            # Update metrics
+            execution_time = (datetime.now() - execution_start).total_seconds()
             self.average_execution_time = (
-                (self.average_execution_time * (self.total_executions - 1) + execution_time) /
+                (self.average_execution_time * (self.total_executions - 1) + execution_time) / 
                 self.total_executions
             )
-            
-            # Store execution history
-            self.execution_history.append(result)
-            if len(self.execution_history) > 1000:  # Keep last 1000 executions
-                self.execution_history.pop(0)
             
             return result
             
         except Exception as e:
-            self.logger.error(f"Order execution failed: {e}")
-            order.status = TradeStatus.FAILED
-            order.error_message = str(e)
+            self.logger.error(f"Error executing order {order.id}: {e}")
+            
+            # Cleanup on error
+            if order.id in self.pending_orders:
+                del self.pending_orders[order.id]
             
             return ExecutionResult(
                 success=False,
-                error_message=f"Execution error: {str(e)}"
+                order_id=order.id,
+                tx_hash=None,
+                amount_in=Decimal('0'),
+                amount_out=Decimal('0'),
+                actual_price=Decimal('0'),
+                gas_used=None,
+                gas_cost=Decimal('0'),
+                execution_time=datetime.now(),
+                error_message=str(e)
             )
-    
-    async def _execute_evm_order(
+
+    async def _simulate_execution(
         self, 
         order: TradeOrder, 
-        opportunity: Optional[TradingOpportunity] = None
+        opportunity: TradingOpportunity
     ) -> ExecutionResult:
         """
-        Execute order on EVM-compatible chain (Ethereum, Base).
+        Simulate order execution for paper trading.
         
         Args:
-            order: Trade order to execute
-            opportunity: Optional trading opportunity
+            order: Trading order
+            opportunity: Trading opportunity
             
         Returns:
-            ExecutionResult with execution details
+            ExecutionResult: Simulated execution result
         """
         try:
-            # This is a placeholder implementation
-            # In production, this would:
-            # 1. Get Web3 connection for chain
-            # 2. Get appropriate DEX router contract
-            # 3. Calculate swap parameters
-            # 4. Estimate gas
-            # 5. Send transaction
-            # 6. Monitor transaction confirmation
+            # Simulate execution delay
+            await asyncio.sleep(0.1)
             
-            self.logger.info(f"Executing EVM order: {order.id} on {order.chain}")
+            # Simulate success/failure based on success rate
+            import random
+            success = random.random() < self.simulation_success_rate
             
-            # Simulate successful execution for testing
-            await asyncio.sleep(2)  # Simulate network delay
+            if not success:
+                return ExecutionResult(
+                    success=False,
+                    order_id=order.id,
+                    tx_hash=None,
+                    amount_in=Decimal('0'),
+                    amount_out=Decimal('0'),
+                    actual_price=Decimal('0'),
+                    gas_used=None,
+                    gas_cost=Decimal('0'),
+                    execution_time=datetime.now(),
+                    error_message="Simulated execution failure"
+                )
             
-            # Simulate execution results
-            if order.trade_type == TradeType.BUY:
-                amount_out = order.amount * Decimal('1000000')  # Simulate token amount
-                actual_price = Decimal('0.000001')  # Simulate price
-            else:
-                amount_out = order.amount * Decimal('0.000001')  # Simulate ETH amount
-                actual_price = Decimal('1000000')  # Simulate price
+            # Calculate simulated execution with slippage
+            target_price = order.target_price or Decimal('1.0')
+            slippage_factor = Decimal(str(1 + random.uniform(-self.simulation_slippage, self.simulation_slippage)))
+            actual_price = target_price * slippage_factor
+            
+            # Calculate amounts
+            if order.order_type == OrderType.BUY:
+                amount_in = order.amount  # Amount of base currency spent
+                amount_out = amount_in / actual_price  # Amount of tokens received
+            else:  # SELL
+                amount_in = order.amount  # Amount of tokens sold
+                amount_out = amount_in * actual_price  # Amount of base currency received
+            
+            # Simulate gas cost
+            simulated_gas_used = random.randint(50000, 200000)
+            simulated_gas_cost = Decimal(str(simulated_gas_used * 20e-9))  # Simulate ~20 gwei
+            
+            # Generate fake transaction hash
+            fake_tx_hash = f"0x{''.join(random.choices('0123456789abcdef', k=64))}"
             
             return ExecutionResult(
                 success=True,
-                tx_hash=f"0x{''.join(['a'] * 64)}",  # Placeholder tx hash
-                amount_in=order.amount,
+                order_id=order.id,
+                tx_hash=fake_tx_hash,
+                amount_in=amount_in,
                 amount_out=amount_out,
                 actual_price=actual_price,
-                gas_used=150000,
-                gas_price=20,
-                slippage_actual=0.02
+                gas_used=simulated_gas_used,
+                gas_cost=simulated_gas_cost,
+                execution_time=datetime.now(),
+                metadata={
+                    'simulated': True,
+                    'slippage': float(slippage_factor - 1),
+                    'chain': order.chain
+                }
             )
             
         except Exception as e:
-            self.logger.error(f"EVM order execution failed: {e}")
+            self.logger.error(f"Error in simulated execution: {e}")
             return ExecutionResult(
                 success=False,
-                error_message=f"EVM execution failed: {str(e)}"
+                order_id=order.id,
+                tx_hash=None,
+                amount_in=Decimal('0'),
+                amount_out=Decimal('0'),
+                actual_price=Decimal('0'),
+                gas_used=None,
+                gas_cost=Decimal('0'),
+                execution_time=datetime.now(),
+                error_message=f"Simulation error: {str(e)}"
             )
-    
-    async def _execute_solana_order(
+
+    async def _execute_live_order(
         self, 
         order: TradeOrder, 
-        opportunity: Optional[TradingOpportunity] = None
+        opportunity: TradingOpportunity
     ) -> ExecutionResult:
         """
-        Execute order on Solana.
+        Execute live order on blockchain (placeholder implementation).
         
         Args:
-            order: Trade order to execute
-            opportunity: Optional trading opportunity
+            order: Trading order
+            opportunity: Trading opportunity
             
         Returns:
-            ExecutionResult with execution details
+            ExecutionResult: Execution result
         """
         try:
-            # This is a placeholder implementation
-            # In production, this would:
-            # 1. Connect to Solana RPC
-            # 2. Use appropriate DEX (Jupiter, Raydium, etc.)
-            # 3. Create and send transaction
-            # 4. Monitor confirmation
+            self.logger.warning("Live execution not implemented - using simulation")
             
-            self.logger.info(f"Executing Solana order: {order.id}")
+            # In a real implementation, this would:
+            # 1. Connect to appropriate blockchain (Ethereum, Base, Solana)
+            # 2. Prepare transaction with optimal gas settings
+            # 3. Submit transaction to mempool
+            # 4. Monitor for confirmation
+            # 5. Handle failed transactions and retries
             
-            # Simulate successful execution
-            await asyncio.sleep(1)  # Solana is faster
-            
-            # Simulate execution results
-            if order.trade_type == TradeType.BUY:
-                amount_out = order.amount * Decimal('1000000')  # Simulate token amount
-                actual_price = Decimal('0.0001')  # Simulate price
-            else:
-                amount_out = order.amount * Decimal('0.0001')  # Simulate SOL amount
-                actual_price = Decimal('10000')  # Simulate price
-            
-            return ExecutionResult(
-                success=True,
-                tx_hash="1" * 88,  # Placeholder Solana tx hash
-                amount_in=order.amount,
-                amount_out=amount_out,
-                actual_price=actual_price,
-                gas_used=5000,  # Solana uses compute units
-                gas_price=1,
-                slippage_actual=0.01
-            )
+            # For now, fall back to simulation
+            return await self._simulate_execution(order, opportunity)
             
         except Exception as e:
-            self.logger.error(f"Solana order execution failed: {e}")
+            self.logger.error(f"Error in live execution: {e}")
             return ExecutionResult(
                 success=False,
-                error_message=f"Solana execution failed: {str(e)}"
+                order_id=order.id,
+                tx_hash=None,
+                amount_in=Decimal('0'),
+                amount_out=Decimal('0'),
+                actual_price=Decimal('0'),
+                gas_used=None,
+                gas_cost=Decimal('0'),
+                execution_time=datetime.now(),
+                error_message=f"Live execution error: {str(e)}"
             )
-    
-    async def _initialize_web3_connections(self) -> None:
-        """Initialize Web3 connections for supported chains."""
-        try:
-            # This would initialize actual Web3 connections
-            # Placeholder implementation
-            self.logger.info("Web3 connections initialized (placeholder)")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Web3 connections: {e}")
-            raise
-    
-    async def _initialize_dex_contracts(self) -> None:
-        """Initialize DEX contract instances."""
-        try:
-            # This would initialize actual DEX contracts
-            # Placeholder implementation
-            self.logger.info("DEX contracts initialized (placeholder)")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to initialize DEX contracts: {e}")
-            raise
-    
-    async def _start_monitoring(self) -> None:
-        """Start transaction monitoring."""
-        try:
-            self.monitoring_active = True
-            # This would start actual transaction monitoring
-            self.logger.info("Transaction monitoring started")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to start monitoring: {e}")
-            raise
-    
+
+    async def _monitoring_loop(self) -> None:
+        """Monitor pending orders and update their status."""
+        self.logger.info("Starting execution monitoring loop")
+        
+        while self.monitoring_active:
+            try:
+                # Check for timed out orders
+                current_time = datetime.now()
+                timeout_threshold = timedelta(seconds=self.transaction_timeout)
+                
+                timed_out_orders = []
+                for order in self.pending_orders.values():
+                    if order.submitted_time:
+                        time_elapsed = current_time - order.submitted_time
+                        if time_elapsed > timeout_threshold:
+                            timed_out_orders.append(order)
+                
+                # Handle timed out orders
+                for order in timed_out_orders:
+                    self.logger.warning(f"Order timed out: {order.id} ({order.token_symbol})")
+                    order.status = OrderStatus.FAILED
+                    if order.id in self.pending_orders:
+                        del self.pending_orders[order.id]
+                
+                # Clean up old execution history
+                if len(self.execution_history) > 1000:
+                    self.execution_history = self.execution_history[-500:]
+                
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+            except asyncio.CancelledError:
+                self.logger.info("Execution monitoring loop cancelled")
+                break
+            except Exception as e:
+                self.logger.error(f"Error in execution monitoring loop: {e}")
+                await asyncio.sleep(60)
+
     def get_execution_metrics(self) -> Dict[str, Any]:
-        """Get execution performance metrics."""
+        """
+        Get execution engine performance metrics.
+        
+        Returns:
+            Dictionary containing execution metrics
+        """
         try:
-            success_rate = (
-                (self.successful_executions / self.total_executions * 100) 
-                if self.total_executions > 0 else 0
-            )
+            success_rate = 0.0
+            if self.total_executions > 0:
+                success_rate = (self.successful_executions / self.total_executions) * 100
+            
+            # Calculate recent performance
+            recent_executions = self.execution_history[-10:] if self.execution_history else []
+            recent_success_rate = 0.0
+            if recent_executions:
+                recent_successes = sum(1 for result in recent_executions if result.success)
+                recent_success_rate = (recent_successes / len(recent_executions)) * 100
             
             return {
                 'total_executions': self.total_executions,
                 'successful_executions': self.successful_executions,
-                'success_rate_percentage': round(success_rate, 2),
-                'average_execution_time_seconds': round(self.average_execution_time, 2),
-                'total_gas_used': self.total_gas_used,
+                'success_rate': success_rate,
+                'recent_success_rate': recent_success_rate,
+                'average_execution_time': self.average_execution_time,
                 'pending_orders': len(self.pending_orders),
-                'recent_executions': [
-                    {
-                        'success': result.success,
-                        'execution_time': result.execution_time,
-                        'gas_used': result.gas_used,
-                        'error': result.error_message
-                    }
-                    for result in self.execution_history[-10:]  # Last 10 executions
-                ]
+                'total_gas_used': self.total_gas_used,
+                'paper_trading_mode': self.paper_trading_mode,
+                'execution_history_size': len(self.execution_history)
             }
             
         except Exception as e:
-            self.logger.error(f"Failed to get execution metrics: {e}")
+            self.logger.error(f"Error getting execution metrics: {e}")
             return {}
-        
-    def get_portfolio_summary(self) -> Dict[str, Any]:
+
+    def set_paper_trading_mode(self, enabled: bool) -> None:
         """
-        Get portfolio summary (delegates to position manager if available).
+        Enable or disable paper trading mode.
         
+        Args:
+            enabled: True to enable paper trading, False for live trading
+        """
+        old_mode = self.paper_trading_mode
+        self.paper_trading_mode = enabled
+        
+        mode_str = "PAPER TRADING" if enabled else "LIVE TRADING"
+        self.logger.info(f"Execution mode changed: {mode_str}")
+        
+        if not enabled:
+            self.logger.warning("⚠️ LIVE TRADING MODE ENABLED - Real funds at risk!")
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """
+        Cancel a pending order.
+        
+        Args:
+            order_id: ID of order to cancel
+            
         Returns:
-            Portfolio summary dictionary
+            bool: True if order was cancelled successfully
         """
         try:
-            if hasattr(self, 'position_manager') and self.position_manager:
-                return self.position_manager.get_portfolio_summary()
+            if order_id in self.pending_orders:
+                order = self.pending_orders[order_id]
+                order.status = OrderStatus.CANCELLED
+                del self.pending_orders[order_id]
+                
+                self.logger.info(f"Order cancelled: {order_id} ({order.token_symbol})")
+                return True
+            else:
+                self.logger.warning(f"Cannot cancel non-existent order: {order_id}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error cancelling order {order_id}: {e}")
+            return False
+
+    async def cancel_all_orders(self) -> int:
+        """
+        Cancel all pending orders.
+        
+        Returns:
+            int: Number of orders cancelled
+        """
+        try:
+            cancelled_count = 0
+            order_ids = list(self.pending_orders.keys())
             
-            # Fallback basic summary from execution engine
-            success_rate = (
-                (self.successful_executions / self.total_executions * 100) 
-                if self.total_executions > 0 else 0
-            )
+            for order_id in order_ids:
+                if await self.cancel_order(order_id):
+                    cancelled_count += 1
             
-            return {
-                'total_positions': 0,
-                'total_trades': self.total_executions,
-                'successful_trades': self.successful_executions,
-                'success_rate': round(success_rate, 2),
-                'total_profit': 0.0,
-                'daily_losses': 0.0,
-                'active_orders': len(self.pending_orders),
-                'average_execution_time': round(self.average_execution_time, 2),
-                'total_gas_used': self.total_gas_used
-            }
+            self.logger.info(f"Cancelled {cancelled_count} pending orders")
+            return cancelled_count
             
         except Exception as e:
-            self.logger.error(f"Failed to get portfolio summary: {e}")
-            return {
-                'total_positions': 0,
-                'total_trades': 0,
-                'successful_trades': 0,
-                'success_rate': 0.0,
-                'total_profit': 0.0,
-                'daily_losses': 0.0,
-                'active_orders': 0
-            }
+            self.logger.error(f"Error cancelling all orders: {e}")
+            return 0
+
+    async def cleanup(self) -> None:
+        """Cleanup execution engine resources."""
+        try:
+            self.logger.info("Cleaning up execution engine...")
+            
+            # Stop monitoring
+            self.monitoring_active = False
+            
+            # Cancel all pending orders
+            await self.cancel_all_orders()
+            
+            self.logger.info("Execution engine cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error during execution engine cleanup: {e}")
