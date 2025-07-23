@@ -258,7 +258,8 @@ class EnhancedTradingSystem:
             # Trading scorer for opportunity ranking
             try:
                 self.analyzers['scorer'] = TradingScorer()
-                await self.analyzers['scorer'].initialize()
+                # TradingScorer doesn't need initialize method
+                self.logger.info("✅ TradingScorer initialized")
             except Exception as e:
                 self.logger.warning(f"TradingScorer initialization failed: {e}")
                 self.analyzers['scorer'] = None
@@ -277,29 +278,47 @@ class EnhancedTradingSystem:
         try:
             self.logger.info("Initializing blockchain monitors...")
             
-            # Ethereum monitor
-            eth_monitor = NewTokenMonitor(
-                chain_type=ChainType.ETHEREUM,
-                scan_interval=5.0
-            )
-            eth_monitor.set_opportunity_callback(self._handle_opportunity)
-            self.monitors.append(eth_monitor)
+            # Ethereum monitor - no parameters needed
+            try:
+                eth_monitor = NewTokenMonitor()
+                eth_monitor.add_callback(self._handle_opportunity)
+                self.monitors.append(eth_monitor)
+                self.logger.info("✅ Ethereum monitor initialized")
+            except Exception as e:
+                self.logger.warning(f"Ethereum monitor failed: {e}")
             
-            # Base chain monitor
-            base_monitor = BaseChainMonitor(scan_interval=2.0)
-            base_monitor.set_opportunity_callback(self._handle_opportunity)
-            self.monitors.append(base_monitor)
+            # Base chain monitor - no parameters needed
+            try:
+                base_monitor = BaseChainMonitor()
+                base_monitor.add_callback(self._handle_opportunity)
+                self.monitors.append(base_monitor)
+                self.logger.info("✅ Base monitor initialized")
+            except Exception as e:
+                self.logger.warning(f"Base monitor failed: {e}")
             
-            # Solana monitors
-            sol_monitor = SolanaMonitor(scan_interval=5.0)
-            sol_monitor.set_opportunity_callback(self._handle_opportunity)
-            self.monitors.append(sol_monitor)
+            # Solana monitors - no parameters needed
+            try:
+                sol_monitor = SolanaMonitor()
+                sol_monitor.add_callback(self._handle_opportunity)
+                self.monitors.append(sol_monitor)
+                self.logger.info("✅ Solana monitor initialized")
+            except Exception as e:
+                self.logger.warning(f"Solana monitor failed: {e}")
             
-            jupiter_monitor = JupiterSolanaMonitor(scan_interval=10.0)
-            jupiter_monitor.set_opportunity_callback(self._handle_opportunity)
-            self.monitors.append(jupiter_monitor)
+            try:
+                jupiter_monitor = JupiterSolanaMonitor()
+                jupiter_monitor.add_callback(self._handle_opportunity)
+                self.monitors.append(jupiter_monitor)
+                self.logger.info("✅ Jupiter monitor initialized")
+            except Exception as e:
+                self.logger.warning(f"Jupiter monitor failed: {e}")
             
-            self.logger.info(f"✅ {len(self.monitors)} monitors initialized")
+            active_monitors = len(self.monitors)
+            self.logger.info(f"✅ {active_monitors}/4 monitors initialized successfully")
+            
+            if active_monitors == 0:
+                self.logger.error("No monitors initialized successfully")
+                raise Exception("Failed to initialize any monitors")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize monitors: {e}")
@@ -382,6 +401,29 @@ class EnhancedTradingSystem:
             opportunity: Trading opportunity to process
         """
         try:
+            # Ensure opportunity has required attributes
+            if not hasattr(opportunity, 'chain') or not opportunity.chain:
+                # Try to infer chain from metadata or set default
+                opportunity.chain = opportunity.metadata.get('chain', 'ethereum')
+            
+            # Ensure opportunity has timestamp - check multiple possible attributes
+            timestamp = None
+            for attr_name in ['timestamp', 'detected_at', 'created_at']:
+                if hasattr(opportunity, attr_name):
+                    timestamp = getattr(opportunity, attr_name)
+                    break
+            
+            if not timestamp:
+                # Set timestamp if missing
+                timestamp = datetime.now()
+                opportunity.timestamp = timestamp
+                if hasattr(opportunity, 'detected_at'):
+                    opportunity.detected_at = timestamp
+            
+            # Ensure price field exists
+            if not hasattr(opportunity.token, 'price'):
+                opportunity.token.price = 1.0  # Default price
+            
             # Update statistics
             self.analysis_stats["total_analyzed"] += 1
             chain = opportunity.chain.lower()
@@ -412,7 +454,10 @@ class EnhancedTradingSystem:
             await self._add_to_dashboard_safe(enhanced_opportunity)
             
         except Exception as e:
-            self.logger.error(f"Error handling opportunity {opportunity.token.symbol}: {e}")
+            token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN') if hasattr(opportunity, 'token') else 'UNKNOWN'
+            self.logger.error(f"Error handling opportunity {token_symbol}: {e}")
+            import traceback
+            self.logger.debug(f"Full traceback: {traceback.format_exc()}")
 
     async def _analyze_opportunity(self, opportunity: TradingOpportunity) -> TradingOpportunity:
         """
@@ -427,11 +472,15 @@ class EnhancedTradingSystem:
         try:
             enhanced_metadata = opportunity.metadata.copy()
             
+            # Ensure opportunity has timestamp
+            if not hasattr(opportunity, 'timestamp') or not opportunity.timestamp:
+                opportunity.timestamp = datetime.now()
+            
             # Contract security analysis
             if self.analyzers.get('contract'):
                 try:
-                    contract_analysis = await self.analyzers['contract'].analyze_token(opportunity.token)
-                    enhanced_metadata['contract_analysis'] = contract_analysis
+                    contract_analysis = await self.analyzers['contract'].analyze_contract(opportunity)
+                    enhanced_metadata['contract_analysis'] = contract_analysis.__dict__ if hasattr(contract_analysis, '__dict__') else contract_analysis
                 except Exception as e:
                     self.logger.warning(f"Contract analysis failed: {e}")
                     enhanced_metadata['contract_analysis'] = {'error': str(e)}
@@ -448,8 +497,8 @@ class EnhancedTradingSystem:
             # Social sentiment analysis
             if self.analyzers.get('social'):
                 try:
-                    social_metrics = await self.analyzers['social'].analyze_token(opportunity.token)
-                    enhanced_metadata['social_metrics'] = social_metrics
+                    social_metrics = await self.analyzers['social'].analyze_social_metrics(opportunity)
+                    enhanced_metadata['social_metrics'] = social_metrics.__dict__ if hasattr(social_metrics, '__dict__') else social_metrics
                 except Exception as e:
                     self.logger.warning(f"Social analysis failed: {e}")
                     enhanced_metadata['social_metrics'] = {'error': str(e)}
@@ -466,23 +515,59 @@ class EnhancedTradingSystem:
             # Trading score and recommendation
             if self.analyzers.get('scorer'):
                 try:
-                    trading_score = await self.analyzers['scorer'].score_opportunity(opportunity)
-                    enhanced_metadata['trading_score'] = trading_score
+                    # TradingScorer.score_opportunity returns a float, not a coroutine
+                    trading_score_result = self.analyzers['scorer'].score_opportunity(opportunity)
                     
-                    # Extract recommendation
-                    recommendation = trading_score.get('recommendation', {})
-                    if recommendation:
-                        action = recommendation.get('action', 'HOLD')
-                        confidence = recommendation.get('confidence', 'MEDIUM')
+                    # Check if it's a coroutine and await if needed
+                    if hasattr(trading_score_result, '__await__'):
+                        trading_score = await trading_score_result
+                    else:
+                        trading_score = trading_score_result
+                    
+                    # Convert float score to dict format
+                    if isinstance(trading_score, (float, int)):
+                        enhanced_metadata['trading_score'] = {
+                            'overall_score': float(trading_score),
+                            'risk_score': 1.0 - float(trading_score),  # Inverse relationship
+                            'opportunity_score': float(trading_score)
+                        }
                         
-                        # Update statistics
-                        if action in self.analysis_stats["recommendations"]:
-                            self.analysis_stats["recommendations"][action] += 1
+                        # Create recommendation based on score
+                        if trading_score >= 0.7:
+                            action = 'BUY'
+                            confidence = 'HIGH'
+                        elif trading_score >= 0.5:
+                            action = 'HOLD'
+                            confidence = 'MEDIUM'
+                        elif trading_score >= 0.3:
+                            action = 'HOLD'
+                            confidence = 'LOW'
+                        else:
+                            action = 'AVOID'
+                            confidence = 'HIGH'
+                            
+                        enhanced_metadata['recommendation'] = {
+                            'action': action,
+                            'confidence': confidence,
+                            'reasoning': f"Score-based analysis suggests {action} with {confidence} confidence (score: {trading_score:.3f})"
+                        }
+                    else:
+                        enhanced_metadata['trading_score'] = trading_score
                         
-                        if confidence == 'HIGH':
-                            self.analysis_stats["high_confidence"] += 1
-                        
-                        enhanced_metadata['recommendation'] = recommendation
+                        # Extract recommendation if it exists
+                        recommendation = trading_score.get('recommendation', {}) if isinstance(trading_score, dict) else {}
+                        if recommendation:
+                            enhanced_metadata['recommendation'] = recommendation
+                    
+                    # Update statistics
+                    action = enhanced_metadata.get('recommendation', {}).get('action', 'HOLD')
+                    confidence = enhanced_metadata.get('recommendation', {}).get('confidence', 'MEDIUM')
+                    
+                    if action in self.analysis_stats["recommendations"]:
+                        self.analysis_stats["recommendations"][action] += 1
+                    
+                    if confidence == 'HIGH':
+                        self.analysis_stats["high_confidence"] += 1
                         
                 except Exception as e:
                     self.logger.warning(f"Trading score analysis failed: {e}")
@@ -512,19 +597,25 @@ class EnhancedTradingSystem:
                 if confidence == 'HIGH':
                     self.analysis_stats["high_confidence"] += 1
             
-            # Create enhanced opportunity
+            # Create enhanced opportunity with correct parameters
             enhanced_opportunity = TradingOpportunity(
                 token=opportunity.token,
                 liquidity=opportunity.liquidity,
-                timestamp=opportunity.timestamp,
-                chain=opportunity.chain,
+                contract_analysis=getattr(opportunity, 'contract_analysis', None),
+                social_metrics=getattr(opportunity, 'social_metrics', None),
+                detected_at=opportunity.timestamp,
                 metadata=enhanced_metadata
             )
+            
+            # Add chain as metadata since it's not a constructor parameter
+            enhanced_opportunity.metadata['chain'] = opportunity.chain
             
             return enhanced_opportunity
             
         except Exception as e:
             self.logger.error(f"Error in comprehensive analysis: {e}")
+            import traceback
+            self.logger.debug(f"Full traceback: {traceback.format_exc()}")
             return opportunity
 
     async def _handle_trading_alert(self, alert_data: Dict[str, Any]) -> None:

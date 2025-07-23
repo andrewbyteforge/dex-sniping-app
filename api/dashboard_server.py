@@ -295,6 +295,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await dashboard_server.handle_websocket_connection(websocket)
 
 
+# Fix for api/dashboard_server.py - replace the problematic sections
+
 @app.get("/api/trades")
 async def get_trade_history() -> dict:
     """
@@ -311,7 +313,19 @@ async def get_trade_history() -> dict:
             hasattr(dashboard_server.position_manager, 'closed_positions')):
             
             try:
-                for exit in dashboard_server.position_manager.closed_positions[-20:]:  # Last 20
+                # Fix: Use list() to convert to list first, then slice
+                closed_positions = dashboard_server.position_manager.closed_positions
+                if hasattr(closed_positions, 'values'):
+                    # It's a dict, get values
+                    positions_list = list(closed_positions.values())
+                else:
+                    # It's already a list
+                    positions_list = list(closed_positions)
+                
+                # Now safely slice the last 20
+                recent_positions = positions_list[-20:] if len(positions_list) > 20 else positions_list
+                
+                for exit in recent_positions:
                     try:
                         trades.append({
                             "id": getattr(exit, 'position_id', 'unknown'),
@@ -326,7 +340,7 @@ async def get_trade_history() -> dict:
                             "pnl": float(getattr(exit, 'realized_pnl', 0))
                         })
                     except Exception as trade_error:
-                        dashboard_server.logger.error(f"Error processing individual trade: {trade_error}")
+                        dashboard_server.logger.debug(f"Error processing individual trade: {trade_error}")
                         continue
             except Exception as position_error:
                 dashboard_server.logger.error(f"Error accessing position manager data: {position_error}")
@@ -353,19 +367,22 @@ async def get_positions() -> dict:
             hasattr(dashboard_server.position_manager, 'active_positions')):
             
             try:
-                for position_id, position in dashboard_server.position_manager.active_positions.items():
-                    try:
-                        positions.append({
-                            "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
-                            "amount": float(getattr(position, 'entry_amount', 0)),
-                            "entry_price": float(getattr(position, 'entry_price', 0)),
-                            "current_price": float(getattr(position, 'current_price', 0)),
-                            "pnl": float(getattr(position, 'unrealized_pnl', 0)),
-                            "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
-                        })
-                    except Exception as pos_error:
-                        dashboard_server.logger.error(f"Error processing position {position_id}: {pos_error}")
-                        continue
+                # Fix: Safely iterate through active positions
+                active_positions = dashboard_server.position_manager.active_positions
+                if hasattr(active_positions, 'items'):
+                    for position_id, position in active_positions.items():
+                        try:
+                            positions.append({
+                                "token_symbol": getattr(position, 'token_symbol', 'UNKNOWN'),
+                                "amount": float(getattr(position, 'entry_amount', 0)),
+                                "entry_price": float(getattr(position, 'entry_price', 0)),
+                                "current_price": float(getattr(position, 'current_price', 0)),
+                                "pnl": float(getattr(position, 'unrealized_pnl', 0)),
+                                "pnl_percentage": getattr(position, 'unrealized_pnl_percentage', 0.0)
+                            })
+                        except Exception as pos_error:
+                            dashboard_server.logger.debug(f"Error processing position {position_id}: {pos_error}")
+                            continue
             except Exception as positions_error:
                 dashboard_server.logger.error(f"Error accessing active positions: {positions_error}")
         
@@ -374,6 +391,19 @@ async def get_positions() -> dict:
     except Exception as e:
         dashboard_server.logger.error(f"Error getting positions: {e}")
         return {"positions": [], "error": str(e), "status": "error"}
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @app.post("/api/trade")

@@ -1,5 +1,3 @@
-# Copy this content to: trading/trading_executor.py
-
 #!/usr/bin/env python3
 """
 Enhanced trading executor with automated execution and comprehensive risk management.
@@ -16,6 +14,9 @@ import asyncio
 import json
 
 from models.token import TradingOpportunity, RiskLevel
+from trading.risk_manager import RiskManager, PositionSizeResult, RiskAssessment
+from trading.position_manager import PositionManager, Position, PositionStatus
+from trading.execution_engine import ExecutionEngine, ExecutionResult
 from utils.logger import logger_manager
 
 
@@ -48,9 +49,9 @@ class TradingExecutor:
 
     def __init__(
         self,
-        risk_manager=None,
-        position_manager=None,
-        execution_engine=None,
+        risk_manager: RiskManager,
+        position_manager: PositionManager,
+        execution_engine: ExecutionEngine,
         trading_mode: TradingMode = TradingMode.PAPER_ONLY
     ) -> None:
         """
@@ -96,11 +97,9 @@ class TradingExecutor:
         try:
             self.logger.info("Initializing trading executor...")
             
-            # Initialize subsystems if they exist
-            if self.execution_engine and hasattr(self.execution_engine, 'initialize'):
-                await self.execution_engine.initialize()
-            if self.position_manager and hasattr(self.position_manager, 'initialize'):
-                await self.position_manager.initialize()
+            # Initialize subsystems
+            await self.execution_engine.initialize()
+            await self.position_manager.initialize()
             
             # Start position monitoring
             if not self.position_monitoring_active:
@@ -112,8 +111,7 @@ class TradingExecutor:
                 self.auto_execution_enabled = True
                 self.logger.warning("⚠️ AUTO-EXECUTION ENABLED - Live trading active")
             elif self.trading_mode == TradingMode.PAPER_ONLY:
-                self.auto_execution_enabled = True  # Enable for paper trading
-                self.logger.info("📄 Paper trading mode - Simulated trades will be executed")
+                self.logger.info("📄 Paper trading mode - No real trades will be executed")
             
             self.logger.info("Trading executor initialized successfully")
             
@@ -141,24 +139,20 @@ class TradingExecutor:
             if self.trading_mode == TradingMode.DISABLED:
                 return ExecutionDecision.SKIP
             
-            # Simple decision logic (would be more complex in production)
-            # For now, randomly decide to simulate trading decisions
-            import random
+            # Assess risk and position sizing
+            risk_assessment = self.risk_manager.assess_opportunity(opportunity)
             
-            # Simulate risk assessment
-            if random.random() < 0.3:  # 30% execution rate
-                decision = ExecutionDecision.EXECUTE
-                self.execution_decisions['execute'] += 1
-                
-                if self.auto_execution_enabled:
-                    await self._execute_trade_simulation(opportunity)
-                    
-            elif random.random() < 0.5:
-                decision = ExecutionDecision.MONITOR
-                self.execution_decisions['monitor'] += 1
-            else:
-                decision = ExecutionDecision.SKIP
-                self.execution_decisions['skip'] += 1
+            # Make execution decision based on risk assessment
+            decision = self._make_execution_decision(opportunity, risk_assessment)
+            
+            # Track decision
+            self.execution_decisions[decision.value] += 1
+            
+            # Execute if approved and auto-execution enabled
+            if decision == ExecutionDecision.EXECUTE and self.auto_execution_enabled:
+                await self._execute_trade(opportunity, risk_assessment)
+            elif decision == ExecutionDecision.EXECUTE and self.confirmation_required:
+                await self._request_trade_confirmation(opportunity, risk_assessment)
             
             return decision
             
@@ -166,74 +160,348 @@ class TradingExecutor:
             self.logger.error(f"Error evaluating opportunity {token_symbol}: {e}")
             return ExecutionDecision.REJECT
 
-    async def _execute_trade_simulation(self, opportunity: TradingOpportunity) -> None:
+    def _make_execution_decision(
+        self, 
+        opportunity: TradingOpportunity, 
+        risk_assessment: Any  # Changed from PositionSizeResult to Any for flexibility
+    ) -> ExecutionDecision:
         """
-        Simulate trade execution for testing.
+        Make execution decision based on risk assessment and portfolio state.
+        
+        Args:
+            opportunity: Trading opportunity
+            risk_assessment: Risk assessment result
+            
+        Returns:
+            ExecutionDecision: Decision outcome
+        """
+        try:
+            # Handle different types of risk assessments
+            if hasattr(risk_assessment, 'risk_assessment'):
+                assessment_value = risk_assessment.risk_assessment
+            else:
+                assessment_value = getattr(risk_assessment, 'risk_assessment', 'CONDITIONAL')
+            
+            # Convert string to enum if needed
+            if isinstance(assessment_value, str):
+                if assessment_value == "REJECTED":
+                    return ExecutionDecision.REJECT
+                elif assessment_value == "APPROVED":
+                    return ExecutionDecision.EXECUTE
+                elif assessment_value == "CONDITIONAL":
+                    return ExecutionDecision.MONITOR
+                else:
+                    return ExecutionDecision.SKIP
+            
+            # Get risk score safely
+            risk_score = getattr(risk_assessment, 'risk_score', 0.5)
+            
+            # Get approved amount safely
+            approved_amount = getattr(risk_assessment, 'approved_amount', 0)
+            if hasattr(approved_amount, '__float__'):
+                approved_amount = float(approved_amount)
+            
+            # Check if we have sufficient approved amount
+            if approved_amount <= 0:
+                self.logger.debug(f"No approved amount for trade: {approved_amount}")
+                return ExecutionDecision.SKIP
+            
+            # Simple decision logic based on risk score
+            if risk_score < 0.3:  # Low risk
+                return ExecutionDecision.EXECUTE
+            elif risk_score < 0.6:  # Medium risk
+                return ExecutionDecision.MONITOR
+            else:  # High risk
+                return ExecutionDecision.REJECT
+                
+        except Exception as e:
+            self.logger.error(f"Error making execution decision: {e}")
+            return ExecutionDecision.REJECT
+
+    async def _execute_trade(
+        self, 
+        opportunity: TradingOpportunity, 
+        risk_assessment: PositionSizeResult
+    ) -> Optional[Position]:
+        """
+        Execute a trade with comprehensive logging and error handling.
         
         Args:
             opportunity: Trading opportunity to execute
+            risk_assessment: Risk assessment with position sizing
+            
+        Returns:
+            Position: Created position if successful, None otherwise
         """
         try:
             token_symbol = opportunity.token.symbol or "UNKNOWN"
-            self.logger.info(f"🔥 SIMULATING TRADE: {token_symbol}")
+            self.logger.info(f"🔥 EXECUTING TRADE: {token_symbol}")
+            self.logger.info(f"   Amount: {risk_assessment.approved_amount}")
+            self.logger.info(f"   Risk Score: {risk_assessment.risk_score:.2f}")
+            self.logger.info(f"   Max Loss: ${risk_assessment.max_loss_usd:.2f}")
             
-            # Simulate execution delay
-            await asyncio.sleep(0.1)
+            # Paper trading simulation
+            if self.trading_mode == TradingMode.PAPER_ONLY:
+                position = await self._simulate_trade(opportunity, risk_assessment)
+                if position:
+                    self.trades_executed += 1
+                    self.logger.info(f"📄 Paper trade executed: {token_symbol} - Position: {position.id}")
+                return position
             
-            # Simulate success/failure
-            import random
-            if random.random() < 0.8:  # 80% success rate
-                self.trades_executed += 1
-                self.successful_trades += 1
-                
-                # Simulate P&L
-                simulated_pnl = Decimal(str(random.uniform(-50, 200)))  # -$50 to +$200
-                self.total_pnl += simulated_pnl
-                
-                self.logger.info(f"✅ Trade executed: {token_symbol} - P&L: ${simulated_pnl:.2f}")
-                
-                # Send alert
-                await self._send_trade_alert(opportunity, "TRADE_EXECUTED", simulated_pnl)
-            else:
-                self.logger.error(f"❌ Trade failed: {token_symbol}")
-                await self._send_trade_alert(opportunity, "TRADE_FAILED")
-                
+            # Live trading execution
+            if self.trading_mode == TradingMode.LIVE_TRADING:
+                position = await self.execution_engine.execute_buy_order(opportunity, risk_assessment)
+                if position:
+                    self.trades_executed += 1
+                    self.successful_trades += 1
+                    self.logger.info(f"💰 Live trade executed: {token_symbol} - Position: {position.id}")
+                    
+                    # Set up automated exit strategies
+                    await self._setup_exit_strategies(position, risk_assessment)
+                    
+                    # Send alerts
+                    await self._send_trade_alert(opportunity, position, "TRADE_EXECUTED")
+                    
+                return position
+            
+            return None
+            
         except Exception as e:
-            self.logger.error(f"Error in trade simulation: {e}")
+            self.logger.error(f"Trade execution failed for {opportunity.token.symbol}: {e}")
+            await self._send_trade_alert(opportunity, None, "TRADE_FAILED", str(e))
+            return None
+
+    async def _simulate_trade(
+        self, 
+        opportunity: TradingOpportunity, 
+        risk_assessment: PositionSizeResult
+    ) -> Optional[Position]:
+        """
+        Simulate a trade for paper trading mode.
+        
+        Args:
+            opportunity: Trading opportunity
+            risk_assessment: Risk assessment result
+            
+        Returns:
+            Position: Simulated position
+        """
+        try:
+            # Create simulated position
+            position = await self.position_manager.open_position(
+                opportunity=opportunity,
+                entry_price=Decimal('1.0'),  # Normalized price for simulation
+                entry_amount=risk_assessment.approved_amount,
+                entry_tx_hash="PAPER_TRADE"
+            )
+            
+            if position:
+                # Set up paper trading parameters
+                position.metadata['paper_trade'] = True
+                position.metadata['simulated_price'] = float(opportunity.token.price or 0)
+                
+                # Set stop loss and take profit based on risk assessment
+                if risk_assessment.recommended_stop_loss:
+                    position.stop_loss_price = position.entry_price * (1 - Decimal(str(risk_assessment.recommended_stop_loss)))
+                
+                if risk_assessment.recommended_take_profit:
+                    position.take_profit_price = position.entry_price * (1 + Decimal(str(risk_assessment.recommended_take_profit)))
+            
+            return position
+            
+        except Exception as e:
+            self.logger.error(f"Paper trade simulation failed: {e}")
+            return None
+
+    async def _setup_exit_strategies(
+        self, 
+        position: Position, 
+        risk_assessment: PositionSizeResult
+    ) -> None:
+        """
+        Set up automated exit strategies for a position.
+        
+        Args:
+            position: Position to set up exit strategies for
+            risk_assessment: Risk assessment with recommended exit levels
+        """
+        try:
+            # Set stop loss
+            if risk_assessment.recommended_stop_loss:
+                stop_loss_price = position.entry_price * (1 - Decimal(str(risk_assessment.recommended_stop_loss)))
+                position.stop_loss_price = stop_loss_price
+                self.logger.info(f"Stop loss set at {stop_loss_price} for {position.token_symbol}")
+            
+            # Set take profit
+            if risk_assessment.recommended_take_profit:
+                take_profit_price = position.entry_price * (1 + Decimal(str(risk_assessment.recommended_take_profit)))
+                position.take_profit_price = take_profit_price
+                self.logger.info(f"Take profit set at {take_profit_price} for {position.token_symbol}")
+            
+            # Set maximum hold time
+            position.max_hold_time = timedelta(hours=24)  # Default 24 hour max hold
+            
+            # Update position in manager
+            await self.position_manager.update_position(position)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to set up exit strategies for {position.token_symbol}: {e}")
 
     async def _monitor_positions(self) -> None:
-        """Monitor positions (placeholder for now)."""
+        """Continuously monitor active positions and execute exit strategies."""
         self.logger.info("Starting position monitoring...")
         
         while self.position_monitoring_active:
             try:
-                # Position monitoring logic would go here
-                await asyncio.sleep(30)  # Check every 30 seconds
+                active_positions = self.position_manager.get_active_positions()
+                
+                for position in active_positions:
+                    await self._check_position_exits(position)
+                
+                # Sleep between monitoring cycles
+                await asyncio.sleep(10)  # Check every 10 seconds
                 
             except asyncio.CancelledError:
                 self.logger.info("Position monitoring cancelled")
                 break
             except Exception as e:
                 self.logger.error(f"Error in position monitoring: {e}")
-                await asyncio.sleep(60)
+                await asyncio.sleep(30)
 
-    async def _send_trade_alert(self, opportunity: TradingOpportunity, alert_type: str, pnl: Decimal = None) -> None:
+    async def _check_position_exits(self, position: Position) -> None:
+        """
+        Check if a position should be exited based on stop loss, take profit, or time limits.
+        
+        Args:
+            position: Position to check for exit conditions
+        """
+        try:
+            # Update current price (this would typically fetch from DEX)
+            # For now, simulate price movement
+            await self._update_position_price(position)
+            
+            # Check stop loss
+            if position.stop_loss_price and position.current_price <= position.stop_loss_price:
+                self.logger.warning(f"Stop loss triggered for {position.token_symbol}")
+                await self._execute_exit(position, "STOP_LOSS")
+                return
+            
+            # Check take profit
+            if position.take_profit_price and position.current_price >= position.take_profit_price:
+                self.logger.info(f"Take profit triggered for {position.token_symbol}")
+                await self._execute_exit(position, "TAKE_PROFIT")
+                return
+            
+            # Check time limit
+            if position.max_hold_time:
+                hold_time = datetime.now() - position.entry_time
+                if hold_time >= position.max_hold_time:
+                    self.logger.info(f"Max hold time reached for {position.token_symbol}")
+                    await self._execute_exit(position, "TIME_LIMIT")
+                    return
+            
+        except Exception as e:
+            self.logger.error(f"Error checking exit conditions for {position.token_symbol}: {e}")
+
+    async def _update_position_price(self, position: Position) -> None:
+        """
+        Update position current price.
+        
+        Args:
+            position: Position to update
+        """
+        try:
+            # This would typically fetch current price from DEX
+            # For paper trading, simulate price movement
+            if position.metadata.get('paper_trade', False):
+                # Simulate random price movement
+                import random
+                price_change = random.uniform(-0.1, 0.1)  # ±10% movement
+                new_price = position.current_price * (1 + Decimal(str(price_change)))
+                position.update_current_price(new_price)
+            else:
+                # TODO: Implement real price fetching from DEX
+                pass
+                
+        except Exception as e:
+            self.logger.error(f"Error updating price for {position.token_symbol}: {e}")
+
+    async def _execute_exit(self, position: Position, reason: str) -> None:
+        """
+        Execute position exit.
+        
+        Args:
+            position: Position to exit
+            reason: Reason for exit
+        """
+        try:
+            self.logger.info(f"🚪 EXITING POSITION: {position.token_symbol} - Reason: {reason}")
+            
+            if self.trading_mode == TradingMode.PAPER_ONLY:
+                # Simulate exit
+                await self.position_manager.close_position(position.id, reason)
+                self.logger.info(f"📄 Paper position closed: {position.token_symbol}")
+            else:
+                # Execute real exit
+                success = await self.execution_engine.execute_sell_order(position)
+                if success:
+                    await self.position_manager.close_position(position.id, reason)
+                    self.logger.info(f"💰 Position closed: {position.token_symbol}")
+            
+            # Send exit alert
+            await self._send_trade_alert(None, position, f"POSITION_CLOSED_{reason}")
+            
+        except Exception as e:
+            self.logger.error(f"Error executing exit for {position.token_symbol}: {e}")
+
+    async def _request_trade_confirmation(
+        self, 
+        opportunity: TradingOpportunity, 
+        risk_assessment: PositionSizeResult
+    ) -> None:
+        """
+        Request manual confirmation for trade execution.
+        
+        Args:
+            opportunity: Trading opportunity
+            risk_assessment: Risk assessment result
+        """
+        try:
+            token_symbol = opportunity.token.symbol or "UNKNOWN"
+            self.logger.info(f"🤔 TRADE CONFIRMATION REQUIRED: {token_symbol}")
+            self.logger.info(f"   Amount: {risk_assessment.approved_amount}")
+            self.logger.info(f"   Risk Score: {risk_assessment.risk_score:.2f}")
+            self.logger.info(f"   Reasons: {' | '.join(risk_assessment.reasons)}")
+            
+            # In a real implementation, this would integrate with dashboard or messaging
+            # For now, just log the request
+            
+        except Exception as e:
+            self.logger.error(f"Error requesting trade confirmation: {e}")
+
+    async def _send_trade_alert(
+        self, 
+        opportunity: Optional[TradingOpportunity], 
+        position: Optional[Position], 
+        alert_type: str,
+        error_message: Optional[str] = None
+    ) -> None:
         """
         Send trade alert to registered callbacks.
         
         Args:
-            opportunity: Trading opportunity
+            opportunity: Trading opportunity (if applicable)
+            position: Position (if applicable)
             alert_type: Type of alert
-            pnl: Profit/loss amount (if applicable)
+            error_message: Error message (if applicable)
         """
         try:
             alert_data = {
                 'type': alert_type,
                 'timestamp': datetime.now().isoformat(),
-                'token_symbol': opportunity.token.symbol,
-                'token_address': opportunity.token.address,
-                'chain': opportunity.chain,
-                'pnl': float(pnl) if pnl else None
+                'opportunity': opportunity.to_dict() if opportunity else None,
+                'position': position.to_dict() if position else None,
+                'error_message': error_message
             }
             
             # Send to all registered callbacks
@@ -266,6 +534,11 @@ class TradingExecutor:
             Dictionary containing portfolio metrics
         """
         try:
+            active_positions = self.position_manager.get_active_positions()
+            total_positions = len(active_positions)
+            total_exposure = self.position_manager.get_total_exposure_usd()
+            daily_pnl = self.position_manager.get_daily_pnl()
+            
             success_rate = 0.0
             if self.trades_executed > 0:
                 success_rate = (self.successful_trades / self.trades_executed) * 100
@@ -276,10 +549,9 @@ class TradingExecutor:
                 'total_trades': self.trades_executed,
                 'successful_trades': self.successful_trades,
                 'success_rate': success_rate,
-                'total_positions': 0,  # Would get from position manager
-                'total_exposure_usd': 0.0,  # Would calculate from positions
-                'total_pnl': float(self.total_pnl),
-                'daily_pnl': float(self.total_pnl),  # Simplified for now
+                'total_positions': total_positions,
+                'total_exposure_usd': total_exposure,
+                'daily_pnl': daily_pnl,
                 'execution_decisions': self.execution_decisions.copy()
             }
             
@@ -287,7 +559,12 @@ class TradingExecutor:
             self.logger.error(f"Error getting portfolio summary: {e}")
             return {}
 
-    async def manual_trade(self, token_address: str, amount: Decimal, chain: str) -> None:
+    async def manual_trade(
+        self, 
+        token_address: str, 
+        amount: Decimal, 
+        chain: str
+    ) -> Optional[Position]:
         """
         Execute a manual trade from dashboard or API.
         
@@ -295,18 +572,55 @@ class TradingExecutor:
             token_address: Token contract address
             amount: Amount to trade
             chain: Blockchain network
+            
+        Returns:
+            Position: Created position if successful
         """
         try:
             self.logger.info(f"Manual trade requested: {token_address} on {chain}")
             
-            # Simulate manual trade execution
-            await asyncio.sleep(0.5)
+            # Create a simplified opportunity for manual trading
+            # This would typically involve fetching token info
+            from models.token import TokenInfo, LiquidityInfo
             
-            # For now, just log the request
-            self.logger.info(f"Manual trade simulated: {amount} on {chain}")
+            token_info = TokenInfo(
+                address=token_address,
+                symbol="MANUAL",
+                name="Manual Trade",
+                decimals=18
+            )
+            
+            liquidity_info = LiquidityInfo(
+                liquidity_usd=10000,  # Assume sufficient liquidity
+                dex_name="Manual",
+                pair_address=""
+            )
+            
+            opportunity = TradingOpportunity(
+                token=token_info,
+                liquidity=liquidity_info,
+                timestamp=datetime.now(),
+                chain=chain,
+                metadata={'manual_trade': True}
+            )
+            
+            # Create manual risk assessment
+            risk_assessment = PositionSizeResult(
+                approved_amount=amount,
+                risk_assessment=RiskAssessment.APPROVED,
+                risk_score=0.5,
+                reasons=["Manual trade - user approved"],
+                max_loss_usd=float(amount) * 0.2,  # 20% stop loss
+                recommended_stop_loss=0.2,
+                recommended_take_profit=0.3
+            )
+            
+            # Execute the trade
+            return await self._execute_trade(opportunity, risk_assessment)
             
         except Exception as e:
             self.logger.error(f"Manual trade execution failed: {e}")
+            return None
 
     def set_trading_mode(self, mode: TradingMode) -> None:
         """
@@ -327,7 +641,7 @@ class TradingExecutor:
             self.confirmation_required = True
             self.logger.info(f"Trading mode changed: {old_mode.value} -> {mode.value}")
         else:
-            self.auto_execution_enabled = mode == TradingMode.PAPER_ONLY
+            self.auto_execution_enabled = False
             self.confirmation_required = False
             self.logger.info(f"Trading mode changed: {old_mode.value} -> {mode.value}")
 
@@ -339,24 +653,17 @@ class TradingExecutor:
             # Stop position monitoring
             self.position_monitoring_active = False
             
+            # Close all active positions if in live trading mode
+            if self.trading_mode == TradingMode.LIVE_TRADING:
+                active_positions = self.position_manager.get_active_positions()
+                for position in active_positions:
+                    await self._execute_exit(position, "SHUTDOWN")
+            
             # Cleanup subsystems
-            if self.execution_engine and hasattr(self.execution_engine, 'cleanup'):
-                await self.execution_engine.cleanup()
-            if self.position_manager and hasattr(self.position_manager, 'cleanup'):
-                await self.position_manager.cleanup()
+            await self.execution_engine.cleanup()
+            await self.position_manager.cleanup()
             
             self.logger.info("Trading executor cleanup completed")
             
         except Exception as e:
             self.logger.error(f"Error during trading executor cleanup: {e}")
-
-
-# For backward compatibility
-TradeConfig = type('TradeConfig', (), {
-    '__init__': lambda self, **kwargs: None,
-    'auto_execute': False,
-    'max_slippage': 0.05,
-    'position_size_eth': 0.1,
-    'stop_loss_percentage': 0.15,
-    'take_profit_percentage': 0.50
-})
