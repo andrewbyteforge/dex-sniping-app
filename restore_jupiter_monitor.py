@@ -41,7 +41,6 @@ class JupiterSolanaMonitor(BaseMonitor):
         """Initialize Jupiter Solana monitor."""
         super().__init__("JupiterSolana")
         self.chain = "solana"
-        self.check_interval = 10  # 10 seconds
         self.api_url = "https://api.jup.ag/tokens/v1"
         self.session: Optional[aiohttp.ClientSession] = None
         self.processed_tokens = set()
@@ -218,6 +217,18 @@ class JupiterSolanaMonitor(BaseMonitor):
         if self.session:
             await self.session.close()
             self.session = None
+    
+    async def _check(self) -> List[TradingOpportunity]:
+        """Internal check method required by base class."""
+        return await self.check_new_opportunities()
+    
+    async def _cleanup(self):
+        """Internal cleanup method required by base class."""
+        await self.cleanup()
+    
+    async def _initialize(self) -> bool:
+        """Internal initialize method required by base class."""
+        return await self.initialize()
 '''
     
     # Write the clean monitor

@@ -341,7 +341,7 @@ class FullEnhancedSystem:
                     dex_name = getattr(eth_config, 'dex_name', 'Uniswap V2')
                     
                     if enabled:
-                        eth_monitor = NewTokenMonitor(check_interval=interval)
+                        eth_monitor = NewTokenMonitor()
                         eth_monitor.add_callback(self._handle_ethereum_opportunity)
                         self.monitors.append(eth_monitor)
                         self.logger.info(f"✅ Ethereum monitor: {dex_name}")
@@ -360,7 +360,7 @@ class FullEnhancedSystem:
                     dex_name = getattr(base_config, 'dex_name', 'Uniswap V2')
                     
                     if enabled:
-                        base_monitor = BaseChainMonitor(check_interval=interval)
+                        base_monitor = BaseChainMonitor()
                         base_monitor.add_callback(self._handle_base_opportunity)
                         self.monitors.append(base_monitor)
                         self.logger.info(f"✅ Base monitor: {dex_name}")
@@ -373,7 +373,7 @@ class FullEnhancedSystem:
                 
             # Solana monitors
             try:
-                pump_monitor = SolanaMonitor(check_interval=5.0)
+                pump_monitor = SolanaMonitor()
                 pump_monitor.add_callback(self._handle_solana_pump_opportunity)
                 self.monitors.append(pump_monitor)
                 self.logger.info("✅ Solana Pump.fun monitor")
@@ -381,7 +381,7 @@ class FullEnhancedSystem:
                 self.logger.warning(f"Solana Pump.fun monitor failed: {e}")
                 
             try:
-                jupiter_monitor = JupiterSolanaMonitor(check_interval=10.0)
+                jupiter_monitor = JupiterSolanaMonitor()
                 jupiter_monitor.add_callback(self._handle_solana_jupiter_opportunity)
                 self.monitors.append(jupiter_monitor)
                 self.logger.info("✅ Solana Jupiter monitor")
