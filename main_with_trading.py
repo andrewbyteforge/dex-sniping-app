@@ -254,21 +254,22 @@ class FullEnhancedSystem:
     # Update the FullEnhancedSystem class _initialize_web_dashboard method:
 
     async def _initialize_web_dashboard(self) -> None:
-        """Initialize full web dashboard with FastAPI and error handling."""
-        global dashboard_server_instance
-        
-        try:
-            self.logger.info("INITIALIZING full web dashboard...")
+            """
+            Initialize full web dashboard with FastAPI.
             
+            Raises:
+                Exception: If dashboard initialization fails
+            """
             try:
+                self.logger.info("INITIALIZING full web dashboard...")
+                
                 # Import the full dashboard server
                 from api.dashboard_server import app, dashboard_server
                 
-                # Set the global reference so we can access it
-                dashboard_server_instance = dashboard_server
+                # Store reference to dashboard server
                 self.dashboard_server = dashboard_server
                 
-                # Connect trading executor (if available)
+                # Connect trading executor
                 self.dashboard_server.trading_executor = self.trading_executor
                 await self.dashboard_server.initialize()
                 
@@ -279,43 +280,30 @@ class FullEnhancedSystem:
                     app,
                     host="0.0.0.0",
                     port=8000,
-                    log_level="warning",  # Reduce log noise
-                    access_log=False
+                    log_level="info",
+                    access_log=False  # Reduce log noise
                 )
                 server = uvicorn.Server(config)
                 
                 # Start server in background task
                 self.web_server_task = asyncio.create_task(server.serve())
                 
-                self.logger.info("✅ Full web dashboard initialized")
-                self.logger.info("   🌐 Dashboard URL: http://localhost:8000")
-                self.logger.info("   📊 Real-time WebSocket updates enabled")
-                
-                if self.trading_executor:
-                    self.logger.info("   💹 Trading execution interface active")
-                else:
-                    self.logger.info("   📊 Monitoring interface active (trading disabled)")
+                self.logger.info("Full web dashboard initialized successfully")
+                self.logger.info("   Dashboard URL: http://localhost:8000")
+                self.logger.info("   Real-time WebSocket updates enabled")
+                self.logger.info("   Trading execution interface active")
                 
                 # Give the server a moment to start
                 await asyncio.sleep(2)
                 
             except ImportError as e:
-                self.logger.error(f"Dashboard import failed: {e}")
-                self.logger.warning("⚠️ Web dashboard disabled - continuing with console only")
+                self.logger.error(f"Failed to import dashboard components: {e}")
+                self.logger.warning("Continuing without web dashboard - using console only")
                 self.dashboard_server = None
-                self.web_server_task = None
-                
             except Exception as e:
-                self.logger.error(f"Dashboard server failed: {e}")
-                self.logger.warning("⚠️ Web dashboard disabled - continuing with console only")
+                self.logger.error(f"Failed to initialize web dashboard: {e}")
+                self.logger.warning("Continuing without web dashboard - using console only")
                 self.dashboard_server = None
-                self.web_server_task = None
-                
-        except Exception as e:
-            self.logger.error(f"Dashboard initialization error: {e}")
-            self.logger.warning("Continuing without web dashboard - using console only")
-            self.dashboard_server = None
-            self.web_server_task = None
 
 
 
@@ -432,26 +420,30 @@ class FullEnhancedSystem:
             raise
             
     async def _handle_ethereum_opportunity(self, opportunity: TradingOpportunity) -> None:
-        """Handle Ethereum opportunity with full analysis and trading."""
-        try:
-            self.opportunities_by_chain["Ethereum"] += 1
-            opportunity.metadata['chain'] = 'ETHEREUM'
+            """
+            Handle Ethereum opportunity with full analysis and trading.
             
-            # Enhanced analysis
-            await self._perform_enhanced_analysis(opportunity)
-            
-            # Log analyzed opportunity
-            await self._log_analyzed_opportunity(opportunity, "ETHEREUM", "ETH")
-            
-            # IMPORTANT: Add to dashboard with proper error handling
-            await self._add_to_dashboard_safe(opportunity)
-            
-            # Execute trading if recommended
-            await self._evaluate_for_trading(opportunity)
-            
-        except Exception as e:
-            self.logger.error(f"Error handling Ethereum opportunity: {e}")
-
+            Args:
+                opportunity: The Ethereum trading opportunity to process
+            """
+            try:
+                self.opportunities_by_chain["Ethereum"] += 1
+                opportunity.metadata['chain'] = 'ETHEREUM'
+                
+                # Enhanced analysis
+                await self._perform_enhanced_analysis(opportunity)
+                
+                # Log analyzed opportunity
+                await self._log_analyzed_opportunity(opportunity, "ETHEREUM", "ETH")
+                
+                # Add to dashboard with proper error handling
+                await self._add_to_dashboard_safe(opportunity)
+                
+                # Execute trading if recommended
+                await self._evaluate_for_trading(opportunity)
+                
+            except Exception as e:
+                self.logger.error(f"Error handling Ethereum opportunity: {e}")
 
 
 
@@ -459,58 +451,73 @@ class FullEnhancedSystem:
 
 
     async def _handle_base_opportunity(self, opportunity: TradingOpportunity) -> None:
-        """Handle Base opportunity with full analysis and trading."""
-        try:
-            self.opportunities_by_chain["Base"] += 1
-            opportunity.metadata['chain'] = 'BASE'
+            """
+            Handle Base opportunity with full analysis and trading.
             
-            await self._perform_enhanced_analysis(opportunity)
-            await self._log_analyzed_opportunity(opportunity, "BASE", "ETH")
-            
-            # IMPORTANT: Add to dashboard with proper error handling
-            await self._add_to_dashboard_safe(opportunity)
-            
-            await self._evaluate_for_trading(opportunity)
-            
-        except Exception as e:
-            self.logger.error(f"Error handling Base opportunity: {e}")
+            Args:
+                opportunity: The Base trading opportunity to process
+            """
+            try:
+                self.opportunities_by_chain["Base"] += 1
+                opportunity.metadata['chain'] = 'BASE'
+                
+                await self._perform_enhanced_analysis(opportunity)
+                await self._log_analyzed_opportunity(opportunity, "BASE", "ETH")
+                
+                # Add to dashboard with proper error handling
+                await self._add_to_dashboard_safe(opportunity)
+                
+                await self._evaluate_for_trading(opportunity)
+                
+            except Exception as e:
+                self.logger.error(f"Error handling Base opportunity: {e}")
             
 
 
 
     async def _handle_solana_pump_opportunity(self, opportunity: TradingOpportunity) -> None:
-        """Handle Solana Pump.fun opportunity."""
-        try:
-            self.opportunities_by_chain["Solana-Pump"] += 1
-            opportunity.metadata['chain'] = 'SOLANA-PUMP'
-            opportunity.metadata['solana_source'] = 'Pump.fun'
+            """
+            Handle Solana Pump.fun opportunity.
             
-            await self._perform_enhanced_analysis(opportunity)
-            await self._log_analyzed_opportunity(opportunity, "SOLANA-PUMP", "SOL")
-            
-            # IMPORTANT: Add to dashboard with proper error handling
-            await self._add_to_dashboard_safe(opportunity)
-            
-        except Exception as e:
-            self.logger.error(f"Error handling Solana Pump opportunity: {e}")
+            Args:
+                opportunity: The Solana Pump.fun trading opportunity to process
+            """
+            try:
+                self.opportunities_by_chain["Solana-Pump"] += 1
+                opportunity.metadata['chain'] = 'SOLANA-PUMP'
+                opportunity.metadata['solana_source'] = 'Pump.fun'
+                
+                await self._perform_enhanced_analysis(opportunity)
+                await self._log_analyzed_opportunity(opportunity, "SOLANA-PUMP", "SOL")
+                
+                # Add to dashboard with proper error handling
+                await self._add_to_dashboard_safe(opportunity)
+                
+            except Exception as e:
+                self.logger.error(f"Error handling Solana Pump opportunity: {e}")
 
 
 
     async def _handle_solana_jupiter_opportunity(self, opportunity: TradingOpportunity) -> None:
-        """Handle Solana Jupiter opportunity."""
-        try:
-            self.opportunities_by_chain["Solana-Jupiter"] += 1
-            opportunity.metadata['chain'] = 'SOLANA-JUPITER'
-            opportunity.metadata['solana_source'] = 'Jupiter'
+            """
+            Handle Solana Jupiter opportunity.
             
-            await self._perform_enhanced_analysis(opportunity)
-            await self._log_analyzed_opportunity(opportunity, "SOLANA-JUPITER", "SOL")
-            
-            # IMPORTANT: Add to dashboard with proper error handling
-            await self._add_to_dashboard_safe(opportunity)
-            
-        except Exception as e:
-            self.logger.error(f"Error handling Solana Jupiter opportunity: {e}")
+            Args:
+                opportunity: The Solana Jupiter trading opportunity to process
+            """
+            try:
+                self.opportunities_by_chain["Solana-Jupiter"] += 1
+                opportunity.metadata['chain'] = 'SOLANA-JUPITER'
+                opportunity.metadata['solana_source'] = 'Jupiter'
+                
+                await self._perform_enhanced_analysis(opportunity)
+                await self._log_analyzed_opportunity(opportunity, "SOLANA-JUPITER", "SOL")
+                
+                # Add to dashboard with proper error handling
+                await self._add_to_dashboard_safe(opportunity)
+                
+            except Exception as e:
+                self.logger.error(f"Error handling Solana Jupiter opportunity: {e}")
 
 
 
@@ -651,43 +658,65 @@ class FullEnhancedSystem:
 
 
     async def _evaluate_for_trading(self, opportunity: TradingOpportunity) -> None:
-        """Evaluate opportunity for trading execution."""
-        try:
-            if not self.trading_executor:
-                return
-                
-            recommendation = opportunity.metadata.get('recommendation', {})
-            action = recommendation.get('action')
-            confidence = recommendation.get('confidence')
+            """
+            Evaluate opportunity for trading execution.
             
-            # Execute on high-confidence strong buys
-            if action == 'STRONG_BUY' and confidence == 'HIGH':
-                self.logger.info(f"🎯 EXECUTING TRADE: {opportunity.token.symbol}")
-                
-                trade_result = await self.trading_executor.execute_opportunity(opportunity)
-                
-                if trade_result:
-                    self.analysis_stats["trades_executed"] += 1
-                    self.logger.info(f"✅ TRADE EXECUTED: {opportunity.token.symbol} - Order ID: {trade_result.id}")
+            Args:
+                opportunity: The trading opportunity to evaluate
+            """
+            try:
+                if not self.trading_executor:
+                    self.logger.debug("Trading executor not available")
+                    return
                     
-                    # Broadcast to dashboard
-                    if self.dashboard_server:
-                        await self.dashboard_server.broadcast_message({
-                            "type": "trade_executed",
-                            "data": {
-                                "token_symbol": opportunity.token.symbol,
-                                "trade_id": trade_result.id,
-                                "status": trade_result.status.value
-                            }
-                        })
+                recommendation = opportunity.metadata.get('recommendation', {})
+                action = recommendation.get('action')
+                confidence = recommendation.get('confidence')
+                
+                # Execute on high-confidence strong buys
+                if action == 'STRONG_BUY' and confidence == 'HIGH':
+                    self.logger.info(f"EXECUTING TRADE: {opportunity.token.symbol}")
+                    
+                    trade_result = await self.trading_executor.execute_opportunity(opportunity)
+                    
+                    if trade_result:
+                        self.analysis_stats["trades_executed"] += 1
+                        self.logger.info(
+                            f"TRADE EXECUTED: {opportunity.token.symbol} - Order ID: {trade_result.id}"
+                        )
+                        
+                        # Broadcast to dashboard
+                        if hasattr(self, 'dashboard_server') and self.dashboard_server:
+                            try:
+                                await self.dashboard_server.broadcast_message({
+                                    "type": "trade_executed",
+                                    "data": {
+                                        "token_symbol": opportunity.token.symbol,
+                                        "trade_id": trade_result.id,
+                                        "status": trade_result.status.value
+                                    }
+                                })
+                            except Exception as broadcast_error:
+                                self.logger.warning(f"Failed to broadcast trade execution: {broadcast_error}")
+                    else:
+                        self.logger.info(
+                            f"TRADE DECLINED: {opportunity.token.symbol} - Risk management"
+                        )
                 else:
-                    self.logger.info(f"❌ TRADE DECLINED: {opportunity.token.symbol} - Risk management")
-            else:
-                self.logger.debug(f"Trade evaluation: {opportunity.token.symbol} - {action} ({confidence})")
-                    
-        except Exception as e:
-            self.logger.error(f"Trading evaluation failed: {e}")
-            
+                    self.logger.debug(
+                        f"Trade evaluation: {opportunity.token.symbol} - {action} ({confidence})"
+                    )
+                        
+            except Exception as e:
+                self.logger.error(f"Trading evaluation failed: {e}")
+
+
+
+
+
+
+
+
     async def _log_analyzed_opportunity(self, opportunity: TradingOpportunity, chain: str, gas_token: str) -> None:
         """Log opportunity with complete analysis results."""
         try:
@@ -782,36 +811,36 @@ class FullEnhancedSystem:
                 await asyncio.sleep(60)
 
     async def _add_to_dashboard_safe(self, opportunity: TradingOpportunity) -> None:
-        """Safely add opportunity to dashboard with error handling."""
-        try:
-            # Try multiple ways to get the dashboard server
-            dashboard = None
+            """
+            Safely add opportunity to dashboard with comprehensive error handling.
             
-            # Method 1: Use instance variable
-            if hasattr(self, 'dashboard_server') and self.dashboard_server:
-                dashboard = self.dashboard_server
-            
-            # Method 2: Use global reference
-            elif dashboard_server_instance:
-                dashboard = dashboard_server_instance
-            
-            # Method 3: Import and use directly
-            if not dashboard:
-                try:
-                    from api.dashboard_server import dashboard_server
-                    dashboard = dashboard_server
-                except ImportError:
-                    pass
-            
-            if dashboard:
-                await dashboard.add_opportunity(opportunity)
-                self.logger.debug(f"✅ Added {opportunity.token.symbol} to dashboard")
-            else:
-                self.logger.warning("Dashboard server not available for opportunity update")
-                
-        except Exception as e:
-            self.logger.error(f"Failed to add opportunity to dashboard: {e}")
-            # Don't let dashboard errors stop the main system
+            Args:
+                opportunity: The trading opportunity to add to dashboard
+            """
+            try:
+                # Check if we have a dashboard server instance
+                if hasattr(self, 'dashboard_server') and self.dashboard_server is not None:
+                    await self.dashboard_server.add_opportunity(opportunity)
+                    self.logger.debug(f"Added {opportunity.token.symbol} to dashboard")
+                else:
+                    # Try to import and access dashboard server directly as fallback
+                    try:
+                        from api.dashboard_server import dashboard_server
+                        if dashboard_server is not None:
+                            await dashboard_server.add_opportunity(opportunity)
+                            self.logger.debug(f"Added {opportunity.token.symbol} to dashboard (fallback)")
+                        else:
+                            self.logger.debug("Dashboard server not available (None)")
+                    except ImportError:
+                        self.logger.debug("Dashboard server not available (import failed)")
+                    except Exception as fallback_error:
+                        self.logger.warning(f"Dashboard fallback failed: {fallback_error}")
+                    
+            except AttributeError as e:
+                self.logger.warning(f"Dashboard attribute error: {e}")
+            except Exception as e:
+                self.logger.error(f"Failed to add opportunity to dashboard: {e}")
+                # Don't let dashboard errors stop the main system
                 
     def _log_system_info(self) -> None:
         """Log complete system information."""
