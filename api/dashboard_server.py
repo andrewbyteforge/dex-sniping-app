@@ -12,6 +12,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from models.watchlist import watchlist_manager, WatchlistStatus
 
 # Simple logging without complex dependencies
 import logging
@@ -1524,6 +1525,163 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in dashboard_server.connected_clients:
             dashboard_server.connected_clients.remove(websocket)
         logger.info(f"WebSocket cleanup complete. Remaining clients: {len(dashboard_server.connected_clients)}")
+
+
+@app.get("/api/watchlist")
+async def get_watchlist(status: Optional[str] = None):
+    """Get watchlist items, optionally filtered by status."""
+    try:
+        status_filter = None
+        if status:
+            try:
+                status_filter = WatchlistStatus(status)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        
+        items = watchlist_manager.get_watchlist(status_filter)
+        
+        return {
+            "items": [item.to_dict() for item in items],
+            "total": len(items),
+            "status_filter": status
+        }
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error getting watchlist: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/watchlist/add")
+async def add_to_watchlist(request: dict):
+    """Add a token to the watchlist."""
+    try:
+        required_fields = ['token_address', 'chain']
+        for field in required_fields:
+            if field not in request:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+        
+        # For now, create a minimal opportunity object
+        # In a real implementation, you'd retrieve the full opportunity
+        from models.token import TokenInfo, LiquidityInfo, TradingOpportunity, ContractAnalysis, SocialMetrics
+        
+        token_info = TokenInfo(
+            address=request['token_address'],
+            symbol=request.get('token_symbol', 'UNKNOWN'),
+            name=request.get('token_name')
+        )
+        
+        liquidity_info = LiquidityInfo(
+            pair_address=request.get('pair_address', ''),
+            dex_name=request.get('dex_name', 'Unknown'),
+            token0=request['token_address'],
+            token1='',
+            reserve0=0.0,
+            reserve1=0.0,
+            liquidity_usd=request.get('liquidity_usd', 0.0),
+            created_at=datetime.now(),
+            block_number=0
+        )
+        
+        opportunity = TradingOpportunity(
+            token=token_info,
+            liquidity=liquidity_info,
+            contract_analysis=ContractAnalysis(),
+            social_metrics=SocialMetrics()
+        )
+        
+        opportunity.metadata['chain'] = request['chain']
+        opportunity.metadata['recommendation'] = request.get('recommendation', {})
+        
+        success = watchlist_manager.add_to_watchlist(
+            opportunity=opportunity,
+            reason=request.get('reason', 'Manual addition'),
+            target_price=request.get('target_price'),
+            stop_loss=request.get('stop_loss'),
+            notes=request.get('notes', '')
+        )
+        
+        if success:
+            # Broadcast to connected clients
+            await dashboard_server.broadcast_message({
+                "type": "watchlist_updated",
+                "data": {
+                    "action": "added",
+                    "token_symbol": token_info.symbol,
+                    "token_address": request['token_address']
+                }
+            })
+            
+            return {"success": True, "message": "Added to watchlist"}
+        else:
+            return {"success": False, "message": "Failed to add to watchlist"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        dashboard_server.logger.error(f"Error adding to watchlist: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/watchlist/remove")
+async def remove_from_watchlist(token_address: str, chain: str):
+    """Remove a token from the watchlist."""
+    try:
+        success = watchlist_manager.remove_from_watchlist(token_address, chain)
+        
+        if success:
+            # Broadcast to connected clients
+            await dashboard_server.broadcast_message({
+                "type": "watchlist_updated",
+                "data": {
+                    "action": "removed",
+                    "token_address": token_address,
+                    "chain": chain
+                }
+            })
+            
+            return {"success": True, "message": "Removed from watchlist"}
+        else:
+            return {"success": False, "message": "Token not found in watchlist"}
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error removing from watchlist: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/watchlist/update")
+async def update_watchlist_item(request: dict):
+    """Update a watchlist item."""
+    try:
+        required_fields = ['token_address', 'chain']
+        for field in required_fields:
+            if field not in request:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+        
+        updates = {k: v for k, v in request.items() if k not in ['token_address', 'chain']}
+        
+        success = watchlist_manager.update_watchlist_item(
+            token_address=request['token_address'],
+            chain=request['chain'],
+            **updates
+        )
+        
+        if success:
+            return {"success": True, "message": "Watchlist item updated"}
+        else:
+            return {"success": False, "message": "Watchlist item not found"}
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error updating watchlist item: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/watchlist/stats")
+async def get_watchlist_stats():
+    """Get watchlist statistics."""
+    try:
+        stats = watchlist_manager.get_stats()
+        return stats
+        
+    except Exception as e:
+        dashboard_server.logger.error(f"Error getting watchlist stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     try:

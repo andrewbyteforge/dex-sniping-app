@@ -504,34 +504,38 @@ class TradingScorer:
             self.logger.error(f"Enhanced liquidity scoring failed: {e}")
             return 0.3
 
-    def generate_recommendation_enhanced(self, opportunity: TradingOpportunity) -> Dict[str, any]:
-        """Enhanced recommendation generation with better thresholds."""
+    # At the top of analyzers/trading_scorer.py, add import:
+    from models.watchlist import watchlist_manager
+
+    # Update the generate_recommendation method in the TradingScorer class:
+    def generate_recommendation(self, opportunity: TradingOpportunity) -> Dict[str, any]:
+        """
+        Generate trading recommendation based on analysis.
+        
+        Args:
+            opportunity: The analyzed opportunity
+            
+        Returns:
+            Dictionary with recommendation details
+        """
         try:
             score = opportunity.confidence_score or 0.0
             risk_level = opportunity.contract_analysis.risk_level
             
-            # More nuanced recommendation logic
-            if score >= 0.85 and risk_level == RiskLevel.LOW:
+            # Determine recommendation
+            if score >= 0.8 and risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]:
                 action = "STRONG_BUY"
                 confidence = "HIGH"
                 position_size = 0.8
-            elif score >= 0.75 and risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]:
-                action = "BUY"
-                confidence = "HIGH"
-                position_size = 0.6
-            elif score >= 0.65 and risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]:
+            elif score >= 0.65 and risk_level != RiskLevel.CRITICAL:
                 action = "BUY"
                 confidence = "MEDIUM"
-                position_size = 0.4
-            elif score >= 0.55 and risk_level == RiskLevel.LOW:
-                action = "SMALL_BUY"
-                confidence = "MEDIUM"
-                position_size = 0.2
+                position_size = 0.5
             elif score >= 0.45 and risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM]:
                 action = "SMALL_BUY"
                 confidence = "LOW"
-                position_size = 0.1
-            elif score >= 0.35:
+                position_size = 0.2
+            elif score >= 0.3:
                 action = "WATCH"
                 confidence = "NEUTRAL"
                 position_size = 0.0
@@ -539,30 +543,17 @@ class TradingScorer:
                 action = "AVOID"
                 confidence = "HIGH"
                 position_size = 0.0
-            
-            # Risk level overrides
-            if risk_level == RiskLevel.CRITICAL:
-                action = "AVOID"
-                confidence = "HIGH"
-                position_size = 0.0
-            elif risk_level == RiskLevel.HIGH and action in ["STRONG_BUY", "BUY"]:
-                action = "SMALL_BUY"  # Downgrade
-                position_size *= 0.5   # Reduce position
-            
-            # Calculate position size by chain
-            chain_configs = {
-                'ETHEREUM': {'max': 0.1, 'unit': 'ETH'},
-                'BASE': {'max': 0.5, 'unit': 'ETH'},
-                'ARBITRUM': {'max': 0.3, 'unit': 'ETH'},
-                'SOLANA': {'max': 100, 'unit': 'SOL'},
-                'BSC': {'max': 1.0, 'unit': 'BNB'},
-                'POLYGON': {'max': 500, 'unit': 'MATIC'}
+                
+            # Calculate suggested position sizes for different chains
+            max_positions = {
+                'ETHEREUM': 0.1,
+                'BASE': 0.5,
+                'SOLANA': 100
             }
             
             chain = opportunity.metadata.get('chain', 'ETHEREUM').upper()
-            chain_config = chain_configs.get(chain, chain_configs['ETHEREUM'])
-            
-            suggested_position = chain_config['max'] * position_size
+            max_position = max_positions.get(chain, 0.1)
+            suggested_position = max_position * position_size
             
             recommendation = {
                 'action': action,
@@ -570,18 +561,59 @@ class TradingScorer:
                 'score': score,
                 'risk_level': risk_level.value,
                 'suggested_position': suggested_position,
-                'position_unit': chain_config['unit'],
                 'chain': chain,
-                'reasons': self._get_recommendation_reasons_enhanced(opportunity),
-                'warnings': self._get_risk_warnings_enhanced(opportunity),
-                'analysis_quality': self._assess_analysis_quality(opportunity)
+                'reasons': self._get_recommendation_reasons(opportunity),
+                'warnings': self._get_risk_warnings(opportunity)
             }
+            
+            # AUTO-ADD TO WATCHLIST for WATCH recommendations
+            if action == "WATCH":
+                try:
+                    reason = f"Auto-added: Score {score:.2f}, {confidence} confidence"
+                    target_price = None  # Could calculate based on analysis
+                    
+                    success = watchlist_manager.add_to_watchlist(
+                        opportunity=opportunity,
+                        reason=reason,
+                        target_price=target_price,
+                        notes=f"Generated recommendation: {action} ({confidence})"
+                    )
+                    
+                    if success:
+                        self.logger.info(f"Auto-added to watchlist: {opportunity.token.symbol}")
+                        recommendation['watchlist_added'] = True
+                    else:
+                        recommendation['watchlist_added'] = False
+                        
+                except Exception as e:
+                    self.logger.error(f"Failed to auto-add to watchlist: {e}")
+                    recommendation['watchlist_added'] = False
             
             return recommendation
             
         except Exception as e:
-            self.logger.error(f"Enhanced recommendation generation failed: {e}")
-            return self._get_safe_default_recommendation()
+            self.logger.error(f"Recommendation generation failed: {e}")
+            return {
+                'action': 'AVOID',
+                'confidence': 'HIGH',
+                'score': 0.0,
+                'risk_level': 'CRITICAL',
+                'suggested_position': 0.0,
+                'reasons': ['Analysis failed'],
+                'warnings': ['Could not analyze token safety'],
+                'watchlist_added': False
+            }
+
+
+
+
+
+
+
+
+
+
+
 
     def _assess_analysis_quality(self, opportunity: TradingOpportunity) -> str:
         """Assess the quality of the analysis performed."""

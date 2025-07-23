@@ -104,34 +104,118 @@ class FullEnhancedSystem:
             await self._cleanup()
             
     async def _initialize_analyzers(self) -> None:
-        """Initialize Phase 2 analysis components."""
+        """Initialize Phase 2 analysis components with robust RPC handling."""
         try:
             self.logger.info("INITIALIZING Phase 2 analyzers...")
             
-            # Initialize Web3 for contract analysis
+            # Initialize Web3 with robust connection handling
             from config.settings import settings
-            self.w3 = Web3(Web3.HTTPProvider(settings.networks.ethereum_rpc_url))
             
-            if not self.w3.is_connected():
-                raise ConnectionError("Failed to connect to Ethereum for analysis")
+            # Try multiple RPC endpoints for reliability
+            rpc_urls = settings.get_rpc_urls('ethereum')
+            
+            self.w3 = None
+            connection_successful = False
+            
+            for i, rpc_url in enumerate(rpc_urls):
+                try:
+                    self.logger.info(f"Attempting Ethereum connection {i+1}/{len(rpc_urls)}: {rpc_url}")
+                    
+                    # Create Web3 instance with timeout
+                    from web3 import Web3
+                    import requests
+                    
+                    # Test the RPC endpoint first with a simple HTTP request
+                    response = requests.get(rpc_url, timeout=10)
+                    if response.status_code not in [200, 405]:  # 405 is also acceptable for some RPCs
+                        self.logger.warning(f"RPC {rpc_url} returned status {response.status_code}")
+                        continue
+                    
+                    # Create Web3 instance
+                    self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+                    
+                    # Test connection with actual Web3 call
+                    if self.w3.is_connected():
+                        # Try to get block number to verify connection works
+                        block_number = self.w3.eth.block_number
+                        if block_number > 0:
+                            self.logger.info(f"✅ Ethereum connection successful! Block: {block_number}")
+                            connection_successful = True
+                            break
+                        else:
+                            self.logger.warning(f"RPC connected but returned invalid block number: {block_number}")
+                            
+                except requests.exceptions.Timeout:
+                    self.logger.warning(f"RPC timeout: {rpc_url}")
+                    continue
+                except requests.exceptions.ConnectionError:
+                    self.logger.warning(f"RPC connection failed: {rpc_url}")
+                    continue
+                except Exception as e:
+                    self.logger.warning(f"RPC error {rpc_url}: {str(e)[:50]}...")
+                    continue
+            
+            # If no connection worked, proceed with limited functionality
+            if not connection_successful:
+                self.logger.warning("Could not establish Ethereum connection - proceeding with limited analysis")
+                self.logger.warning("Contract analysis will be disabled, social analysis will still work")
                 
-            # Initialize analyzers
-            self.contract_analyzer = ContractAnalyzer(self.w3)
-            await self.contract_analyzer.initialize()
+                # Create a dummy Web3 instance to prevent crashes
+                self.w3 = None
             
-            self.social_analyzer = SocialAnalyzer()
-            await self.social_analyzer.initialize()
+            # Initialize analyzers with error handling
+            try:
+                if self.w3:
+                    self.contract_analyzer = ContractAnalyzer(self.w3)
+                    await self.contract_analyzer.initialize()
+                    self.logger.info("✅ Contract analyzer initialized")
+                else:
+                    self.contract_analyzer = None
+                    self.logger.warning("⚠️ Contract analyzer disabled (no Ethereum connection)")
+            except Exception as e:
+                self.logger.error(f"Contract analyzer initialization failed: {e}")
+                self.contract_analyzer = None
             
-            self.trading_scorer = TradingScorer()
+            try:
+                self.social_analyzer = SocialAnalyzer()
+                await self.social_analyzer.initialize()
+                self.logger.info("✅ Social analyzer initialized")
+            except Exception as e:
+                self.logger.error(f"Social analyzer initialization failed: {e}")
+                self.social_analyzer = None
             
-            self.logger.info("✅ Phase 2 analyzers initialized successfully")
+            try:
+                self.trading_scorer = TradingScorer()
+                self.logger.info("✅ Trading scorer initialized")
+            except Exception as e:
+                self.logger.error(f"Trading scorer initialization failed: {e}")
+                self.trading_scorer = None
+            
+            # Report initialization status
+            initialized_components = []
+            if self.contract_analyzer:
+                initialized_components.append("Contract Analyzer")
+            if self.social_analyzer:
+                initialized_components.append("Social Analyzer")
+            if self.trading_scorer:
+                initialized_components.append("Trading Scorer")
+            
+            if initialized_components:
+                self.logger.info(f"✅ Phase 2 analyzers partially initialized: {', '.join(initialized_components)}")
+            else:
+                self.logger.warning("⚠️ No analyzers initialized - system will run with basic monitoring only")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize analyzers: {e}")
-            raise
+            self.logger.error(f"Analyzer initialization error: {e}")
+            # Don't fail the entire system - continue with limited functionality
+            self.contract_analyzer = None
+            self.social_analyzer = None
+            self.trading_scorer = None
+            self.w3 = None
+            self.logger.warning("Continuing with basic monitoring only")
             
     async def _initialize_trading_system(self) -> None:
-        """Initialize full trading system."""
+        """Initialize full trading system with graceful error handling."""
         try:
             self.logger.info("INITIALIZING full trading system...")
             
@@ -144,69 +228,94 @@ class FullEnhancedSystem:
                 take_profit_percentage=0.50  # 50% take profit
             )
             
-            self.trading_executor = TradingExecutor(trade_config)
-            await self.trading_executor.initialize()
-            
-            self.logger.info("✅ Full trading system initialized")
-            self.logger.info(f"   - Auto Execute: {trade_config.auto_execute}")
-            self.logger.info(f"   - Max Slippage: {trade_config.max_slippage * 100}%")
-            self.logger.info(f"   - Position Size: {trade_config.position_size_eth} ETH")
-            self.logger.info(f"   - Stop Loss: {trade_config.stop_loss_percentage * 100}%")
-            self.logger.info(f"   - Take Profit: {trade_config.take_profit_percentage * 100}%")
+            try:
+                self.trading_executor = TradingExecutor(trade_config)
+                await self.trading_executor.initialize()
+                
+                self.logger.info("✅ Full trading system initialized")
+                self.logger.info(f"   - Auto Execute: {trade_config.auto_execute}")
+                self.logger.info(f"   - Max Slippage: {trade_config.max_slippage * 100}%")
+                self.logger.info(f"   - Position Size: {trade_config.position_size_eth} ETH")
+                self.logger.info(f"   - Stop Loss: {trade_config.stop_loss_percentage * 100}%")
+                self.logger.info(f"   - Take Profit: {trade_config.take_profit_percentage * 100}%")
+                
+            except Exception as e:
+                self.logger.error(f"Trading executor initialization failed: {e}")
+                self.trading_executor = None
+                self.logger.warning("⚠️ Trading system disabled - continuing with monitoring only")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize trading system: {e}")
-            raise
-            
+            self.logger.error(f"Trading system initialization error: {e}")
+            self.trading_executor = None
+            self.logger.warning("⚠️ Trading system disabled - continuing with monitoring only")
+
     dashboard_server_instance = None
 
     # Update the FullEnhancedSystem class _initialize_web_dashboard method:
 
     async def _initialize_web_dashboard(self) -> None:
-        """Initialize full web dashboard with FastAPI."""
+        """Initialize full web dashboard with FastAPI and error handling."""
         global dashboard_server_instance
         
         try:
             self.logger.info("INITIALIZING full web dashboard...")
             
-            # Import the full dashboard server
-            from api.dashboard_server import app, dashboard_server
-            
-            # Set the global reference so we can access it
-            dashboard_server_instance = dashboard_server
-            self.dashboard_server = dashboard_server
-            
-            # Connect trading executor
-            self.dashboard_server.trading_executor = self.trading_executor
-            await self.dashboard_server.initialize()
-            
-            # Start FastAPI web server
-            import uvicorn
-            
-            config = uvicorn.Config(
-                app,
-                host="0.0.0.0",
-                port=8000,
-                log_level="info",
-                access_log=False  # Reduce log noise
-            )
-            server = uvicorn.Server(config)
-            
-            # Start server in background task
-            self.web_server_task = asyncio.create_task(server.serve())
-            
-            self.logger.info("✅ Full web dashboard initialized")
-            self.logger.info("   🌐 Dashboard URL: http://localhost:8000")
-            self.logger.info("   📊 Real-time WebSocket updates enabled")
-            self.logger.info("   💹 Trading execution interface active")
-            
-            # Give the server a moment to start
-            await asyncio.sleep(2)
-            
+            try:
+                # Import the full dashboard server
+                from api.dashboard_server import app, dashboard_server
+                
+                # Set the global reference so we can access it
+                dashboard_server_instance = dashboard_server
+                self.dashboard_server = dashboard_server
+                
+                # Connect trading executor (if available)
+                self.dashboard_server.trading_executor = self.trading_executor
+                await self.dashboard_server.initialize()
+                
+                # Start FastAPI web server
+                import uvicorn
+                
+                config = uvicorn.Config(
+                    app,
+                    host="0.0.0.0",
+                    port=8000,
+                    log_level="warning",  # Reduce log noise
+                    access_log=False
+                )
+                server = uvicorn.Server(config)
+                
+                # Start server in background task
+                self.web_server_task = asyncio.create_task(server.serve())
+                
+                self.logger.info("✅ Full web dashboard initialized")
+                self.logger.info("   🌐 Dashboard URL: http://localhost:8000")
+                self.logger.info("   📊 Real-time WebSocket updates enabled")
+                
+                if self.trading_executor:
+                    self.logger.info("   💹 Trading execution interface active")
+                else:
+                    self.logger.info("   📊 Monitoring interface active (trading disabled)")
+                
+                # Give the server a moment to start
+                await asyncio.sleep(2)
+                
+            except ImportError as e:
+                self.logger.error(f"Dashboard import failed: {e}")
+                self.logger.warning("⚠️ Web dashboard disabled - continuing with console only")
+                self.dashboard_server = None
+                self.web_server_task = None
+                
+            except Exception as e:
+                self.logger.error(f"Dashboard server failed: {e}")
+                self.logger.warning("⚠️ Web dashboard disabled - continuing with console only")
+                self.dashboard_server = None
+                self.web_server_task = None
+                
         except Exception as e:
-            self.logger.error(f"Failed to initialize web dashboard: {e}")
+            self.logger.error(f"Dashboard initialization error: {e}")
             self.logger.warning("Continuing without web dashboard - using console only")
-
+            self.dashboard_server = None
+            self.web_server_task = None
 
 
 
@@ -408,24 +517,85 @@ class FullEnhancedSystem:
 
 
     async def _perform_enhanced_analysis(self, opportunity: TradingOpportunity) -> None:
-        """Perform complete enhanced analysis on opportunity."""
+        """Perform complete enhanced analysis on opportunity with graceful degradation."""
         try:
             self.analysis_stats["total_analyzed"] += 1
             
-            # Contract analysis (for EVM chains)
-            if 'SOLANA' not in opportunity.metadata.get('chain', ''):
-                opportunity.contract_analysis = await self.contract_analyzer.analyze_contract(opportunity)
+            # Initialize default analysis objects if they don't exist
+            if not hasattr(opportunity, 'contract_analysis') or not opportunity.contract_analysis:
+                from models.token import ContractAnalysis
+                opportunity.contract_analysis = ContractAnalysis()
+                
+            if not hasattr(opportunity, 'social_metrics') or not opportunity.social_metrics:
+                from models.token import SocialMetrics
+                opportunity.social_metrics = SocialMetrics()
             
-            # Social analysis
-            opportunity.social_metrics = await self.social_analyzer.analyze_social_metrics(opportunity)
+            # Contract analysis (for EVM chains only, and only if analyzer available)
+            chain = opportunity.metadata.get('chain', '')
+            if 'SOLANA' not in chain and self.contract_analyzer:
+                try:
+                    self.logger.debug(f"Running contract analysis for {opportunity.token.symbol}")
+                    opportunity.contract_analysis = await self.contract_analyzer.analyze_contract(opportunity)
+                except Exception as e:
+                    self.logger.error(f"Contract analysis failed for {opportunity.token.symbol}: {e}")
+                    # Keep default analysis object
+            elif 'SOLANA' not in chain:
+                self.logger.debug(f"Contract analysis skipped - no analyzer available")
+                # Set basic risk assessment for EVM tokens without analysis
+                from models.token import RiskLevel
+                opportunity.contract_analysis.risk_level = RiskLevel.MEDIUM
+                opportunity.contract_analysis.risk_score = 0.5
+                opportunity.contract_analysis.analysis_notes.append("Contract analysis unavailable - Ethereum connection failed")
             
-            # Generate trading recommendation
-            score = self.trading_scorer.score_opportunity(opportunity)
-            recommendation = self.trading_scorer.generate_recommendation(opportunity)
+            # Social analysis (if analyzer available)
+            if self.social_analyzer:
+                try:
+                    self.logger.debug(f"Running social analysis for {opportunity.token.symbol}")
+                    opportunity.social_metrics = await self.social_analyzer.analyze_social_metrics(opportunity)
+                except Exception as e:
+                    self.logger.error(f"Social analysis failed for {opportunity.token.symbol}: {e}")
+                    # Keep default social metrics
+            else:
+                self.logger.debug(f"Social analysis skipped - no analyzer available")
+                # Set neutral social metrics
+                opportunity.social_metrics.social_score = 0.3
+                opportunity.social_metrics.sentiment_score = 0.0
+            
+            # Generate trading recommendation (if scorer available)
+            if self.trading_scorer:
+                try:
+                    self.logger.debug(f"Generating recommendation for {opportunity.token.symbol}")
+                    score = self.trading_scorer.score_opportunity(opportunity)
+                    recommendation = self.trading_scorer.generate_recommendation(opportunity)
+                except Exception as e:
+                    self.logger.error(f"Trading scoring failed for {opportunity.token.symbol}: {e}")
+                    # Generate basic recommendation
+                    recommendation = {
+                        'action': 'WATCH',
+                        'confidence': 'LOW',
+                        'score': 0.3,
+                        'risk_level': opportunity.contract_analysis.risk_level.value,
+                        'suggested_position': 0.0,
+                        'reasons': ['Limited analysis available'],
+                        'warnings': ['Analysis components unavailable']
+                    }
+            else:
+                self.logger.debug(f"Trading scoring skipped - no scorer available")
+                # Generate basic recommendation
+                recommendation = {
+                    'action': 'WATCH',
+                    'confidence': 'LOW', 
+                    'score': 0.3,
+                    'risk_level': opportunity.contract_analysis.risk_level.value,
+                    'suggested_position': 0.0,
+                    'reasons': ['Basic monitoring only'],
+                    'warnings': ['Full analysis unavailable']
+                }
             
             # Update metadata
             opportunity.metadata['recommendation'] = recommendation
             opportunity.metadata['analysis_timestamp'] = datetime.now()
+            opportunity.metadata['analysis_mode'] = 'full' if (self.contract_analyzer and self.social_analyzer and self.trading_scorer) else 'limited'
             
             # Update statistics
             action = recommendation.get('action', 'UNKNOWN')
@@ -434,19 +604,52 @@ class FullEnhancedSystem:
                 
             if recommendation.get('confidence') == 'HIGH':
                 self.analysis_stats["high_confidence"] += 1
-                
-        except Exception as e:
-            self.logger.error(f"Enhanced analysis failed: {e}")
-            # Set safe defaults
-            opportunity.contract_analysis.risk_level = RiskLevel.HIGH
-            opportunity.metadata['recommendation'] = {
-                'action': 'AVOID',
-                'confidence': 'HIGH',
-                'score': 0.0,
-                'reasons': ['Analysis failed'],
-                'warnings': ['Could not analyze token safety']
-            }
             
+            self.logger.debug(f"Analysis complete for {opportunity.token.symbol}: {action} ({recommendation.get('confidence')})")
+            
+        except Exception as e:
+            self.logger.error(f"Enhanced analysis failed for {opportunity.token.symbol}: {e}")
+            
+            # Ensure we have minimal required objects
+            try:
+                from models.token import ContractAnalysis, SocialMetrics, RiskLevel
+                
+                if not hasattr(opportunity, 'contract_analysis'):
+                    opportunity.contract_analysis = ContractAnalysis()
+                opportunity.contract_analysis.risk_level = RiskLevel.HIGH
+                opportunity.contract_analysis.risk_score = 0.8
+                opportunity.contract_analysis.analysis_notes.append(f"Analysis failed: {str(e)}")
+                
+                if not hasattr(opportunity, 'social_metrics'):
+                    opportunity.social_metrics = SocialMetrics()
+                opportunity.social_metrics.social_score = 0.1
+                
+                # Set safe default recommendation
+                opportunity.metadata['recommendation'] = {
+                    'action': 'AVOID',
+                    'confidence': 'HIGH',
+                    'score': 0.0,
+                    'risk_level': 'HIGH',
+                    'suggested_position': 0.0,
+                    'reasons': ['Analysis system error'],
+                    'warnings': ['Could not analyze token safety']
+                }
+                opportunity.metadata['analysis_timestamp'] = datetime.now()
+                opportunity.metadata['analysis_mode'] = 'error'
+                
+            except Exception as fallback_error:
+                self.logger.error(f"Even fallback analysis failed: {fallback_error}")
+
+
+
+
+
+
+
+
+
+
+
     async def _evaluate_for_trading(self, opportunity: TradingOpportunity) -> None:
         """Evaluate opportunity for trading execution."""
         try:
