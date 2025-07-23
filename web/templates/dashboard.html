@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Chain DEX Sniping Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1b3e 100%);
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+
+        .dashboard {
+            min-height: 100vh;
+            display: grid;
+            grid-template-areas: 
+                "header header header"
+                "stats stats stats"
+                "opportunities chains analytics"
+                "recent recent recent";
+            grid-template-columns: 1fr 300px 300px;
+            grid-template-rows: auto auto 1fr auto;
+            gap: 20px;
+            padding: 20px;
+        }
+
+        .header {
+            grid-area: header;
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(45deg, #00d4ff, #ff6b35);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            margin-top: 15px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 20px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00ff88;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .stats-grid {
+            grid-area: stats;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #00ff88, #00d4ff);
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 5px;
+            color: #00ff88;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .opportunities {
+            grid-area: opportunities;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+        }
+
+        .section-header {
+            padding: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .opportunity-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .opportunity-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .opportunity-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .opportunity-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .token-symbol {
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .risk-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .risk-low { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .risk-medium { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .risk-high { background: rgba(255, 107, 53, 0.2); color: #ff6b35; }
+        .risk-critical { background: rgba(220, 53, 69, 0.2); color: #dc3545; }
+
+        .opportunity-details {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+            line-height: 1.4;
+        }
+
+        .chain-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-size: 11px;
+            margin-right: 5px;
+        }
+
+        .chain-ethereum { background: rgba(98, 126, 234, 0.2); color: #627eea; }
+        .chain-base { background: rgba(0, 82, 255, 0.2); color: #0052ff; }
+        .chain-solana { background: rgba(220, 31, 255, 0.2); color: #dc1fff; }
+
+        .chains-panel {
+            grid-area: chains;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .chain-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .chain-item:last-child {
+            border-bottom: none;
+        }
+
+        .chain-name {
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chain-stats {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .analytics-panel {
+            grid-area: analytics;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .analytics-chart {
+            padding: 20px;
+            height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .recent-trades {
+            grid-area: recent;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+        }
+
+        .trades-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .trades-table th,
+        .trades-table td {
+            padding: 12px 20px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .trades-table th {
+            background: rgba(255, 255, 255, 0.02);
+            font-weight: 600;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .action-button {
+            background: linear-gradient(45deg, #00d4ff, #0099cc);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-right: 5px;
+        }
+
+        .action-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .action-button.danger {
+            background: linear-gradient(45deg, #ff6b35, #cc5529);
+        }
+
+        .action-button.danger:hover {
+            box-shadow: 0 8px 20px rgba(255, 107, 53, 0.3);
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-left: auto;
+        }
+
+        .recommendation {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        .rec-strong-buy { background: rgba(0, 255, 136, 0.3); color: #00ff88; }
+        .rec-buy { background: rgba(0, 212, 255, 0.3); color: #00d4ff; }
+        .rec-watch { background: rgba(255, 193, 7, 0.3); color: #ffc107; }
+        .rec-avoid { background: rgba(255, 107, 53, 0.3); color: #ff6b35; }
+
+        .loading {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #00ff88;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .notification {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 10px;
+            border-left: 4px solid;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            animation: slideIn 0.3s ease;
+        }
+        
+        .notification-success { border-left-color: #00ff88; }
+        .notification-error { border-left-color: #ff6b35; }
+        .notification-info { border-left-color: #00d4ff; }
+        
+        .notification button {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 0 4px;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        /* Mobile responsiveness */
+        @media (max-width: 1200px) {
+            .dashboard {
+                grid-template-areas: 
+                    "header"
+                    "stats"
+                    "opportunities"
+                    "chains"
+                    "analytics"
+                    "recent";
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Header -->
+        <div class="header">
+            <h1>🚀 Multi-Chain DEX Sniping Dashboard</h1>
+            <p>Real-time monitoring across Ethereum, Base, and Solana</p>
+            <div class="header-controls">
+                <div class="status-indicator">
+                    <div class="status-dot"></div>
+                    <span>Auto-Refresh Active</span>
+                </div>
+                <div class="controls">
+                    <button class="action-button" onclick="toggleAutoRefresh()">
+                        <span id="auto-refresh-btn-text">Disable Auto-Refresh</span>
+                    </button>
+                    <button class="action-button" onclick="refreshData()">
+                        <div class="loading" id="refresh-spinner" style="display:none;"></div>
+                        <span id="refresh-text">Manual Refresh</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Grid -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="total-opportunities">0</div>
+                <div class="stat-label">Total Opportunities</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="high-confidence">0</div>
+                <div class="stat-label">High Confidence</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="active-chains">0</div>
+                <div class="stat-label">Active Chains</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="analysis-rate">0</div>
+                <div class="stat-label">Analysis/Min</div>
+            </div>
+        </div>
+
+        <!-- Opportunities Panel -->
+        <div class="opportunities">
+            <div class="section-header">
+                <span>🎯 Live Opportunities</span>
+                <span class="controls">
+                    <button class="action-button" onclick="clearOpportunities()">Clear</button>
+                </span>
+            </div>
+            <div class="opportunity-list" id="opportunity-list">
+                <div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">
+                    <div class="loading"></div>
+                    <p>Loading opportunities...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chains Panel -->
+        <div class="chains-panel">
+            <div class="section-header">
+                <span>⛓️ Chain Status</span>
+            </div>
+            <div class="chain-item">
+                <div class="chain-name">
+                    <span class="chain-badge chain-ethereum">ETH</span>
+                    Ethereum
+                    <span style="margin-left: auto; color: #00ff88;">●</span>
+                </div>
+                <div class="chain-stats" id="eth-stats">Active</div>
+            </div>
+            <div class="chain-item">
+                <div class="chain-name">
+                    <span class="chain-badge chain-base">BASE</span>
+                    Base
+                    <span style="margin-left: auto; color: #00ff88;">●</span>
+                </div>
+                <div class="chain-stats" id="base-stats">Active</div>
+            </div>
+            <div class="chain-item">
+                <div class="chain-name">
+                    <span class="chain-badge chain-solana">SOL</span>
+                    Solana
+                    <span style="margin-left: auto; color: #00ff88;">●</span>
+                </div>
+                <div class="chain-stats" id="sol-stats">Active</div>
+            </div>
+        </div>
+
+        <!-- Analytics Panel -->
+        <div class="analytics-panel">
+            <div class="section-header">
+                <span>📊 Analytics</span>
+            </div>
+            <div class="analytics-chart">
+                Auto-refreshing every 5 seconds
+            </div>
+        </div>
+
+        <!-- Recent Activity -->
+        <div class="recent-trades">
+            <div class="section-header">
+                <span>📈 Recent Analysis</span>
+            </div>
+            <table class="trades-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Token</th>
+                        <th>Chain</th>
+                        <th>Risk</th>
+                        <th>Recommendation</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="recent-activity">
+                    <tr><td colspan="6" style="text-align: center; color: rgba(255,255,255,0.5);">Loading recent activity...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Dashboard state
+        let dashboardData = {
+            opportunities: [],
+            recentActivity: [],
+            stats: {
+                totalOpportunities: 0,
+                highConfidence: 0,
+                activeChains: 3,
+                analysisRate: 0
+            }
+        };
+
+        // Auto-refresh settings
+        let autoRefreshEnabled = true;
+        let autoRefreshTimer;
+        let ws;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+
+        // Initialize dashboard
+        function initDashboard() {
+            console.log('🚀 Initializing dashboard...');
+            updateStats();
+            renderOpportunities();
+            renderRecentActivity();
+            
+            // Start auto-refresh
+            startAutoRefresh();
+            
+            // Start WebSocket
+            connectWebSocket();
+            
+            console.log('✅ Dashboard initialized');
+        }
+
+        // Auto-refresh functionality
+        function startAutoRefresh() {
+            if (autoRefreshTimer) {
+                clearInterval(autoRefreshTimer);
+            }
+            
+            console.log('🔄 Starting auto-refresh (5s interval)');
+            
+            // Initial load
+            loadRealData();
+            
+            // Set up timer
+            autoRefreshTimer = setInterval(() => {
+                if (autoRefreshEnabled) {
+                    console.log('🔄 Auto-refreshing...');
+                    loadRealData();
+                    updateAgeTimestamps();
+                }
+            }, 5000);
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            const btn = document.getElementById('auto-refresh-btn-text');
+            const indicator = document.querySelector('.status-indicator span');
+            
+            if (autoRefreshEnabled) {
+                btn.textContent = 'Disable Auto-Refresh';
+                indicator.textContent = 'Auto-Refresh Active';
+                console.log('✅ Auto-refresh enabled');
+            } else {
+                btn.textContent = 'Enable Auto-Refresh';
+                indicator.textContent = 'Auto-Refresh Disabled';
+                console.log('❌ Auto-refresh disabled');
+            }
+        }
+
+        // Load real data from API
+        async function loadRealData() {
+            try {
+                // Load opportunities
+                const opportunities = await apiRequest('/opportunities');
+                
+                if (opportunities && opportunities.length > 0) {
+                    dashboardData.opportunities = opportunities.map(opp => ({
+                        token: { symbol: opp.token_symbol, address: opp.token_address },
+                        chain: opp.chain.toLowerCase(),
+                        risk: opp.risk_level,
+                        recommendation: opp.recommendation,
+                        confidence: opp.confidence,
+                        score: opp.score,
+                        liquidity: `$${(opp.liquidity_usd / 1000).toFixed(0)}K`,
+                        age: `${opp.age_minutes}m`,
+                        detected_at: new Date(Date.now() - opp.age_minutes * 60000)
+                    }));
+                    
+                    console.log(`📊 Loaded ${opportunities.length} opportunities`);
+                }
+                
+                // Load stats
+                const stats = await apiRequest('/stats');
+                if (stats) {
+                    dashboardData.stats = {
+                        totalOpportunities: stats.total_opportunities || 0,
+                        highConfidence: stats.high_confidence || 0,
+                        activeChains: stats.active_chains || 3,
+                        analysisRate: stats.analysis_rate || 0
+                    };
+                }
+                
+                // Load trade history
+                const trades = await apiRequest('/trades');
+                if (trades && trades.trades) {
+                    dashboardData.recentActivity = trades.trades.slice(0, 20).map(trade => ({
+                        time: new Date(trade.created_at).toLocaleTimeString(),
+                        token: trade.token_symbol,
+                        chain: trade.chain,
+                        risk: 'unknown',
+                        recommendation: trade.trade_type,
+                        status: trade.status
+                    }));
+                }
+                
+                // Update displays
+                updateStats();
+                renderOpportunities();
+                renderRecentActivity();
+                
+            } catch (error) {
+                console.error('❌ Failed to load data:', error);
+                showNotification('Failed to refresh data', 'error');
+            }
+        }
+
+        // Update age timestamps
+        function updateAgeTimestamps() {
+            dashboardData.opportunities.forEach(opp => {
+                if (opp.detected_at) {
+                    const ageMinutes = Math.floor((Date.now() - opp.detected_at.getTime()) / 60000);
+                    opp.age = `${ageMinutes}m`;
+                }
+            });
+            renderOpportunities();
+        }
+
+        // API request function
+        async function apiRequest(endpoint, options = {}) {
+            try {
+                const response = await fetch(`/api${endpoint}`, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    },
+                    ...options
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`API request failed: ${response.statusText}`);
+                }
+                
+                return await response.json();
+            } catch (error) {
+                console.error('API request failed:', error);
+                throw error;
+            }
+        }
+
+        // WebSocket connection
+        function connectWebSocket() {
+            try {
+                console.log('🌐 Connecting WebSocket...');
+                ws = new WebSocket('ws://localhost:8000/ws');
+                
+                ws.onopen = function(event) {
+                    console.log('✅ WebSocket connected');
+                    reconnectAttempts = 0;
+                    
+                    ws.send(JSON.stringify({
+                        type: 'subscribe',
+                        topics: ['opportunities', 'trades', 'stats']
+                    }));
+                };
+                
+                ws.onmessage = function(event) {
+                    const message = JSON.parse(event.data);
+                    console.log('📨 WebSocket message:', message.type);
+                    handleWebSocketMessage(message);
+                };
+                
+                ws.onclose = function(event) {
+                    console.log('❌ WebSocket disconnected');
+                    
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        console.log(`🔄 Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`);
+                        setTimeout(connectWebSocket, 3000 * reconnectAttempts);
+                    }
+                };
+                
+                ws.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                };
+                
+            } catch (error) {
+                console.error('Failed to connect WebSocket:', error);
+            }
+        }
+
+        function handleWebSocketMessage(message) {
+            switch (message.type) {
+                case 'new_opportunity':
+                    console.log('🎯 New opportunity via WebSocket:', message.data.token_symbol);
+                    // Force refresh data to get latest
+                    loadRealData();
+                    showNotification(`New opportunity: ${message.data.token_symbol}`, 'success');
+                    break;
+                case 'trade_executed':
+                    showNotification(`Trade executed: ${message.data.token_symbol}`, 'success');
+                    break;
+                case 'stats_update':
+                    updateStatsFromWS(message.data);
+                    break;
+                case 'subscribed':
+                    console.log('✅ Subscribed to WebSocket updates');
+                    break;
+                default:
+                    console.log('Unknown message type:', message.type);
+            }
+        }
+
+        function updateStatsFromWS(data) {
+            Object.assign(dashboardData.stats, data);
+            updateStats();
+        }
+
+        // Update statistics
+        function updateStats() {
+            document.getElementById('total-opportunities').textContent = dashboardData.stats.totalOpportunities;
+            document.getElementById('high-confidence').textContent = dashboardData.stats.highConfidence;
+            document.getElementById('active-chains').textContent = dashboardData.stats.activeChains;
+            document.getElementById('analysis-rate').textContent = dashboardData.stats.analysisRate;
+        }
+
+        // Render opportunities
+        function renderOpportunities() {
+            const container = document.getElementById('opportunity-list');
+            container.innerHTML = '';
+
+            if (dashboardData.opportunities.length === 0) {
+                container.innerHTML = '<div style="padding: 20px; text-align: center; color: rgba(255,255,255,0.5);">No opportunities detected yet...</div>';
+                return;
+            }
+
+            dashboardData.opportunities.forEach(opp => {
+                const item = document.createElement('div');
+                item.className = 'opportunity-item';
+                item.innerHTML = `
+                    <div class="opportunity-header">
+                        <span class="token-symbol">${opp.token.symbol}</span>
+                        <span class="risk-badge risk-${opp.risk}">${opp.risk}</span>
+                    </div>
+                    <div class="opportunity-details">
+                        <span class="chain-badge chain-${opp.chain}">${opp.chain.toUpperCase()}</span>
+                        Score: ${opp.score.toFixed(2)} | Liquidity: ${opp.liquidity} | Age: ${opp.age}
+                        <span class="recommendation rec-${opp.recommendation.toLowerCase().replace('_', '-')}">${opp.recommendation}</span>
+                        <div style="margin-top: 8px;">
+                            <button class="action-button" onclick="executeTrade('${opp.token.symbol}')">Trade</button>
+                            <button class="action-button" onclick="viewDetails('${opp.token.symbol}')">Details</button>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(item);
+            });
+        }
+
+        // Render recent activity
+        function renderRecentActivity() {
+            const tbody = document.getElementById('recent-activity');
+            tbody.innerHTML = '';
+
+            if (dashboardData.recentActivity.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: rgba(255,255,255,0.5);">No recent activity...</td></tr>';
+                return;
+            }
+
+            dashboardData.recentActivity.forEach(activity => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${activity.time}</td>
+                    <td>${activity.token}</td>
+                    <td><span class="chain-badge chain-${activity.chain}">${activity.chain.toUpperCase()}</span></td>
+                    <td><span class="risk-badge risk-${activity.risk}">${activity.risk}</span></td>
+                    <td><span class="recommendation rec-${activity.recommendation.toLowerCase().replace('_', '-')}">${activity.recommendation}</span></td>
+                    <td><button class="action-button" onclick="executeTrade('${activity.token}')">Trade</button></td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        // Event handlers
+        function refreshData() {
+            const spinner = document.getElementById('refresh-spinner');
+            const text = document.getElementById('refresh-text');
+            
+            spinner.style.display = 'inline-block';
+            text.textContent = 'Refreshing...';
+            
+            loadRealData().then(() => {
+                spinner.style.display = 'none';
+                text.textContent = 'Manual Refresh';
+                showNotification('Data refreshed successfully', 'success');
+            }).catch(() => {
+                spinner.style.display = 'none';
+                text.textContent = 'Manual Refresh';
+                showNotification('Refresh failed', 'error');
+            });
+        }
+
+        function clearOpportunities() {
+            dashboardData.opportunities = [];
+            updateStats();
+            renderOpportunities();
+        }
+
+        function executeTrade(token) {
+            showNotification(`Trade execution for ${token} - Feature coming soon!`, 'info');
+        }
+
+        function viewDetails(token) {
+            showNotification(`Viewing details for ${token}`, 'info');
+        }
+
+        // Notification system
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.className = `notification notification-${type}`;
+            notification.innerHTML = `
+                <span>${message}</span>
+                <button onclick="this.parentElement.remove()">×</button>
+            `;
+            
+            let container = document.getElementById('notifications');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'notifications';
+                container.style.cssText = `
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    z-index: 1000;
+                    max-width: 400px;
+                `;
+                document.body.appendChild(container);
+            }
+            
+            container.appendChild(notification);
+            
+            setTimeout(() => {
+                if (notification.parentElement) {
+                    notification.remove();
+                }
+            }, 5000);
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', initDashboard);
+    </script>
+</body>
+</html>

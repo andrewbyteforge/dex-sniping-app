@@ -1,0 +1,34 @@
+# Environment variables and config
+.env
+.env.local
+config.json
+secrets.json
+
+# Node modules (if using Node.js)
+node_modules/
+npm-debug.log*
+
+# Python (if using Python)
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build outputs
+dist/
+build/
