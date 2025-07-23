@@ -16,9 +16,9 @@ from fastapi import Request
 from pydantic import BaseModel
 import uvicorn
 import os
-
 from models.token import TradingOpportunity, RiskLevel
 from utils.logger import logger_manager
+
 
 # Pydantic models for API
 class TradeRequest(BaseModel):
@@ -28,6 +28,7 @@ class TradeRequest(BaseModel):
     chain: str = "ethereum"
     order_type: str = "market"
 
+
 class PositionResponse(BaseModel):
     token_symbol: str
     amount: float
@@ -35,6 +36,7 @@ class PositionResponse(BaseModel):
     current_price: float
     pnl: float
     pnl_percentage: float
+
 
 class OpportunityResponse(BaseModel):
     token_symbol: str
@@ -47,6 +49,7 @@ class OpportunityResponse(BaseModel):
     liquidity_usd: float
     age_minutes: int
 
+
 # Create FastAPI app
 app = FastAPI(title="DEX Sniping Dashboard API", version="1.0.0")
 
@@ -57,6 +60,7 @@ templates = Jinja2Templates(directory="web/templates")
 if os.path.exists("web/static"):
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
+
 class DashboardServer:
     """
     Dashboard server that provides API endpoints and WebSocket connections
@@ -66,7 +70,13 @@ class DashboardServer:
     def __init__(self):
         """Initialize the dashboard server."""
         self.logger = logger_manager.get_logger("DashboardServer")
+        
+        # Trading system components (will be set by main system)
         self.trading_executor = None
+        self.risk_manager = None
+        self.position_manager = None
+        
+        # WebSocket clients
         self.connected_clients: List[WebSocket] = []
         self.opportunities_queue: List[TradingOpportunity] = []
         
@@ -78,6 +88,66 @@ class DashboardServer:
             "analysis_rate": 0,
             "uptime_start": datetime.now()
         }
+
+    def get_safe_portfolio_summary(self) -> Dict[str]:
+        """
+        Safely get portfolio summary from available components.
+        
+        Returns:
+            Portfolio summary dictionary
+        """
+        try:
+            # Try position manager first (most comprehensive)
+            if self.position_manager:
+                return self.position_manager.get_portfolio_summary()
+            
+            # Try trading executor
+            elif self.trading_executor and hasattr(self.trading_executor, 'get_portfolio_summary'):
+                return self.trading_executor.get_portfolio_summary()
+            
+            # Fallback to default
+            else:
+                return {
+                    'total_positions': 0,
+                    'total_trades': 0,
+                    'successful_trades': 0,
+                    'success_rate': 0.0,
+                    'total_profit': 0.0,
+                    'daily_losses': 0.0,
+                    'active_orders': 0,
+                    'status': 'No trading components connected'
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error getting safe portfolio summary: {e}")
+            return {
+                'total_positions': 0,
+                'total_trades': 0,
+                'error': str(e)
+            }
+
+    def get_safe_risk_status(self) -> Dict[str, Any]:
+        """
+        Safely get risk management status.
+        
+        Returns:
+            Risk status dictionary
+        """
+        try:
+            if self.risk_manager:
+                return self.risk_manager.get_portfolio_status()
+            else:
+                return {
+                    'total_positions': 0,
+                    'current_exposure_usd': 0.0,
+                    'max_exposure_usd': 0.0,
+                    'daily_pnl': 0.0,
+                    'status': 'No risk manager connected'
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error getting risk status: {e}")
+            return {'error': str(e)}
         
     async def initialize(self):
         """Initialize the trading executor and start services."""
@@ -225,12 +295,15 @@ async def get_dashboard(request: Request):
 
 @app.get("/api/stats")
 async def get_stats():
-    """Get current system statistics."""
+    """Get current system statistics with safe component access."""
     try:
-        portfolio = {}
-        if dashboard_server.trading_executor:
-            portfolio = dashboard_server.trading_executor.get_portfolio_summary()
+        # Get portfolio summary safely
+        portfolio = dashboard_server.get_safe_portfolio_summary()
         
+        # Get risk status safely
+        risk_status = dashboard_server.get_safe_risk_status()
+        
+        # Calculate uptime
         uptime = datetime.now() - dashboard_server.stats["uptime_start"]
         
         return {
@@ -238,14 +311,34 @@ async def get_stats():
             "high_confidence": dashboard_server.stats["high_confidence"], 
             "active_chains": dashboard_server.stats["active_chains"],
             "analysis_rate": dashboard_server.stats["analysis_rate"],
-            "uptime_hours": uptime.total_seconds() / 3600,
+            "uptime_hours": round(uptime.total_seconds() / 3600, 2),
             "portfolio": portfolio,
-            "connected_clients": len(dashboard_server.connected_clients)
+            "risk_status": risk_status,
+            "connected_clients": len(dashboard_server.connected_clients),
+            "components_status": {
+                "trading_executor": dashboard_server.trading_executor is not None,
+                "position_manager": dashboard_server.position_manager is not None,
+                "risk_manager": dashboard_server.risk_manager is not None
+            }
         }
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return basic stats even if there's an error
+        return {
+            "total_opportunities": 0,
+            "high_confidence": 0,
+            "active_chains": 0,
+            "analysis_rate": 0,
+            "uptime_hours": 0,
+            "portfolio": {"error": str(e)},
+            "connected_clients": len(dashboard_server.connected_clients),
+            "error": "Stats calculation failed"
+        }
+
+
+
+
 
 @app.get("/api/opportunities", response_model=List[OpportunityResponse])
 async def get_opportunities():
@@ -276,52 +369,93 @@ async def get_opportunities():
 
 @app.get("/api/positions", response_model=List[PositionResponse])
 async def get_positions():
-    """Get current trading positions."""
+    """Get current trading positions with safe access."""
     try:
         positions = []
         
-        if dashboard_server.trading_executor:
-            for position in dashboard_server.trading_executor.positions.values():
+        if dashboard_server.position_manager:
+            # Get positions from position manager
+            for position_id, position in dashboard_server.position_manager.active_positions.items():
                 positions.append(PositionResponse(
                     token_symbol=position.token_symbol,
-                    amount=float(position.amount),
+                    amount=float(position.entry_amount),
                     entry_price=float(position.entry_price),
                     current_price=float(position.current_price),
-                    pnl=float(position.pnl),
-                    pnl_percentage=position.pnl_percentage
+                    pnl=float(position.unrealized_pnl),
+                    pnl_percentage=position.unrealized_pnl_percentage
                 ))
+        elif dashboard_server.trading_executor:
+            # Fallback to trading executor
+            if hasattr(dashboard_server.trading_executor, 'positions'):
+                for position in dashboard_server.trading_executor.positions.values():
+                    positions.append(PositionResponse(
+                        token_symbol=position.token_symbol,
+                        amount=float(position.amount),
+                        entry_price=float(position.entry_price),
+                        current_price=float(position.current_price),
+                        pnl=float(position.pnl),
+                        pnl_percentage=position.pnl_percentage
+                    ))
             
         return positions
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting positions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return empty list on error rather than raising exception
+        return []
+
+
+
+
+
 
 @app.get("/api/trades")
 async def get_trade_history():
-    """Get recent trade history."""
+    """Get recent trade history with safe access."""
     try:
         trades = []
         
-        if dashboard_server.trading_executor:
-            for trade in dashboard_server.trading_executor.trade_history[-50:]:  # Last 50
+        if dashboard_server.position_manager:
+            # Get closed positions from position manager
+            for exit in dashboard_server.position_manager.closed_positions[-50:]:  # Last 50
                 trades.append({
-                    "id": trade.id,
-                    "token_symbol": trade.token_symbol,
-                    "trade_type": trade.trade_type.value,
-                    "amount": float(trade.amount),
-                    "status": trade.status.value,
-                    "created_at": trade.created_at.isoformat(),
-                    "executed_at": trade.executed_at.isoformat() if trade.executed_at else None,
-                    "tx_hash": trade.tx_hash,
-                    "chain": trade.chain
+                    "id": exit.position_id,
+                    "token_symbol": dashboard_server.position_manager._get_token_from_position_id(exit.position_id),
+                    "trade_type": "sell",  # Exit trades
+                    "amount": float(exit.exit_amount),
+                    "status": "completed",
+                    "created_at": exit.exit_time.isoformat(),
+                    "executed_at": exit.exit_time.isoformat(),
+                    "tx_hash": exit.exit_tx_hash,
+                    "chain": dashboard_server.position_manager._get_chain_from_position_id(exit.position_id),
+                    "pnl": float(exit.realized_pnl),
+                    "pnl_percentage": exit.realized_pnl_percentage
                 })
+        elif dashboard_server.trading_executor:
+            # Fallback to trading executor
+            if hasattr(dashboard_server.trading_executor, 'trade_history'):
+                for trade in dashboard_server.trading_executor.trade_history[-50:]:
+                    trades.append({
+                        "id": trade.id,
+                        "token_symbol": trade.token_symbol,
+                        "trade_type": trade.trade_type.value,
+                        "amount": float(trade.amount),
+                        "status": trade.status.value,
+                        "created_at": trade.created_at.isoformat(),
+                        "executed_at": trade.executed_at.isoformat() if trade.executed_at else None,
+                        "tx_hash": trade.tx_hash,
+                        "chain": trade.chain
+                    })
             
         return {"trades": trades}
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting trade history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"trades": [], "error": str(e)}
+
+
+
+
 
 @app.post("/api/trade")
 async def execute_trade(trade_request: TradeRequest):
