@@ -254,57 +254,61 @@ class FullEnhancedSystem:
     # Update the FullEnhancedSystem class _initialize_web_dashboard method:
 
     async def _initialize_web_dashboard(self) -> None:
-            """
-            Initialize full web dashboard with FastAPI.
+        """
+        Initialize full web dashboard with FastAPI.
+        
+        Raises:
+            ImportError: If dashboard modules are not available
+            Exception: If server initialization fails
+        """
+        try:
+            self.logger.info("INITIALIZING full web dashboard...")
             
-            Raises:
-                Exception: If dashboard initialization fails
-            """
-            try:
-                self.logger.info("INITIALIZING full web dashboard...")
-                
-                # Import the full dashboard server
-                from api.dashboard_server import app, dashboard_server
-                
-                # Store reference to dashboard server
-                self.dashboard_server = dashboard_server
-                
-                # Connect trading executor
+            # Import the full dashboard server
+            from api.dashboard_server import app, dashboard_server
+            
+            # Store reference to dashboard server
+            self.dashboard_server = dashboard_server
+            
+            # Connect trading executor to dashboard
+            if self.trading_executor:
                 self.dashboard_server.trading_executor = self.trading_executor
-                await self.dashboard_server.initialize()
-                
-                # Start FastAPI web server
-                import uvicorn
-                
-                config = uvicorn.Config(
-                    app,
-                    host="0.0.0.0",
-                    port=8000,
-                    log_level="info",
-                    access_log=False  # Reduce log noise
-                )
-                server = uvicorn.Server(config)
-                
-                # Start server in background task
-                self.web_server_task = asyncio.create_task(server.serve())
-                
-                self.logger.info("Full web dashboard initialized successfully")
-                self.logger.info("   Dashboard URL: http://localhost:8000")
-                self.logger.info("   Real-time WebSocket updates enabled")
-                self.logger.info("   Trading execution interface active")
-                
-                # Give the server a moment to start
-                await asyncio.sleep(2)
-                
-            except ImportError as e:
-                self.logger.error(f"Failed to import dashboard components: {e}")
-                self.logger.warning("Continuing without web dashboard - using console only")
-                self.dashboard_server = None
-            except Exception as e:
-                self.logger.error(f"Failed to initialize web dashboard: {e}")
-                self.logger.warning("Continuing without web dashboard - using console only")
-                self.dashboard_server = None
-
+            
+            # Initialize dashboard server
+            await self.dashboard_server.initialize()
+            
+            # Configure and start FastAPI server
+            import uvicorn
+            
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=8000,
+                log_level="warning",  # Reduce noise
+                access_log=False
+            )
+            
+            server = uvicorn.Server(config)
+            
+            # Start server in background task
+            self.web_server_task = asyncio.create_task(server.serve())
+            
+            self.logger.info("SUCCESS: Full web dashboard initialized")
+            self.logger.info("   Dashboard URL: http://localhost:8000")
+            self.logger.info("   Real-time WebSocket updates enabled")
+            self.logger.info("   Trading execution interface active")
+            
+            # Allow server to fully start
+            await asyncio.sleep(2)
+            
+        except ImportError as e:
+            self.logger.error(f"Dashboard modules not found: {e}")
+            self.logger.warning("Install FastAPI: pip install fastapi uvicorn")
+            self.dashboard_server = None
+        except Exception as e:
+            self.logger.error(f"Failed to initialize web dashboard: {e}")
+            self.logger.warning("Continuing without web dashboard - console only")
+            self.dashboard_server = None
 
 
 
@@ -811,37 +815,52 @@ class FullEnhancedSystem:
                 await asyncio.sleep(60)
 
     async def _add_to_dashboard_safe(self, opportunity: TradingOpportunity) -> None:
-            """
-            Safely add opportunity to dashboard with comprehensive error handling.
+        """
+        Safely add opportunity to dashboard with comprehensive error handling.
+        
+        Args:
+            opportunity: The trading opportunity to add to dashboard
             
-            Args:
-                opportunity: The trading opportunity to add to dashboard
-            """
-            try:
-                # Check if we have a dashboard server instance
-                if hasattr(self, 'dashboard_server') and self.dashboard_server is not None:
-                    await self.dashboard_server.add_opportunity(opportunity)
-                    self.logger.debug(f"Added {opportunity.token.symbol} to dashboard")
-                else:
-                    # Try to import and access dashboard server directly as fallback
-                    try:
-                        from api.dashboard_server import dashboard_server
-                        if dashboard_server is not None:
-                            await dashboard_server.add_opportunity(opportunity)
-                            self.logger.debug(f"Added {opportunity.token.symbol} to dashboard (fallback)")
-                        else:
-                            self.logger.debug("Dashboard server not available (None)")
-                    except ImportError:
-                        self.logger.debug("Dashboard server not available (import failed)")
-                    except Exception as fallback_error:
-                        self.logger.warning(f"Dashboard fallback failed: {fallback_error}")
-                    
-            except AttributeError as e:
-                self.logger.warning(f"Dashboard attribute error: {e}")
-            except Exception as e:
-                self.logger.error(f"Failed to add opportunity to dashboard: {e}")
-                # Don't let dashboard errors stop the main system
+        Note:
+            This method will not raise exceptions - dashboard errors won't stop the main system
+        """
+        try:
+            if not self.dashboard_server:
+                self.logger.debug("Dashboard server not initialized - skipping update")
+                return
                 
+            # Validate opportunity has required data
+            if not opportunity or not opportunity.token:
+                self.logger.warning("Invalid opportunity data for dashboard")
+                return
+                
+            # Add to dashboard
+            await self.dashboard_server.add_opportunity(opportunity)
+            
+            # Log success
+            token_symbol = opportunity.token.symbol or "UNKNOWN"
+            self.logger.debug(f"Added {token_symbol} to dashboard queue")
+            
+            # Update dashboard statistics
+            if hasattr(self.dashboard_server, 'stats'):
+                self.dashboard_server.stats['total_opportunities'] += 1
+                
+        except AttributeError as e:
+            self.logger.error(f"Dashboard server missing method: {e}")
+        except asyncio.CancelledError:
+            # Don't log cancellation during shutdown
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to add opportunity to dashboard: {e}")
+            # Continue without dashboard update - don't interrupt main flow
+
+
+
+
+
+
+
+
     def _log_system_info(self) -> None:
         """Log complete system information."""
         self.logger.info("FULL ENHANCED MULTI-CHAIN DEX SNIPING SYSTEM")

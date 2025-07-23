@@ -124,83 +124,54 @@ async def get_stats() -> dict:
 @app.get("/api/opportunities", response_model=List[OpportunityResponse])
 async def get_opportunities() -> List[OpportunityResponse]:
     """
-    Get current trading opportunities.
+    Get current trading opportunities from the queue.
     
     Returns:
-        List of current trading opportunities
+        List of OpportunityResponse objects with recent opportunities
+        
+    Raises:
+        HTTPException: If there's an error retrieving opportunities
     """
     try:
         opportunities = []
         
-        for opp in dashboard_server.opportunities_queue[-20:]:  # Last 20
+        # Get last 20 opportunities from queue
+        recent_opportunities = list(dashboard_server.opportunities_queue)[-20:]
+        
+        for opp in recent_opportunities:
             try:
-                age_minutes = (datetime.now() - opp.detected_at).total_seconds() / 60
+                # Calculate age in minutes
+                age_minutes = int((datetime.now() - opp.detected_at).total_seconds() / 60)
                 
-                # Safe extraction of liquidity_usd
-                liquidity_usd = 0.0
-                try:
-                    if hasattr(opp.liquidity, 'liquidity_usd') and opp.liquidity.liquidity_usd is not None:
-                        liquidity_usd = float(opp.liquidity.liquidity_usd)
-                except Exception as liq_error:
-                    dashboard_server.logger.debug(f"Error extracting liquidity_usd: {liq_error}")
+                # Extract recommendation safely
+                recommendation = opp.metadata.get("recommendation", {})
                 
-                # Safe extraction of other fields
-                token_symbol = "UNKNOWN"
-                try:
-                    if hasattr(opp.token, 'symbol') and opp.token.symbol:
-                        token_symbol = str(opp.token.symbol)
-                except Exception:
-                    pass
+                # Create response object with validation
+                opportunity_response = OpportunityResponse(
+                    token_symbol=opp.token.symbol or "UNKNOWN",
+                    token_address=opp.token.address,
+                    chain=opp.metadata.get("chain", "ethereum").lower(),
+                    risk_level=opp.contract_analysis.risk_level.value if opp.contract_analysis else "unknown",
+                    recommendation=recommendation.get("action", "UNKNOWN"),
+                    confidence=recommendation.get("confidence", "UNKNOWN"),
+                    score=float(recommendation.get("score", 0.0)),
+                    liquidity_usd=float(opp.liquidity.liquidity_usd) if opp.liquidity else 0.0,
+                    age_minutes=age_minutes
+                )
                 
-                token_address = ""
-                try:
-                    if hasattr(opp.token, 'address') and opp.token.address:
-                        token_address = str(opp.token.address)
-                except Exception:
-                    pass
+                opportunities.append(opportunity_response)
                 
-                chain = "ethereum"
-                try:
-                    chain = str(opp.metadata.get("chain", "ethereum"))
-                except Exception:
-                    pass
-                
-                risk_level = "unknown"
-                try:
-                    if hasattr(opp.contract_analysis, 'risk_level') and opp.contract_analysis.risk_level:
-                        risk_level = str(opp.contract_analysis.risk_level.value)
-                except Exception:
-                    pass
-                
-                recommendation_data = opp.metadata.get("recommendation", {})
-                recommendation = str(recommendation_data.get("action", "UNKNOWN"))
-                confidence = str(recommendation_data.get("confidence", "UNKNOWN"))
-                score = float(recommendation_data.get("score", 0.0))
-                
-                opportunities.append(OpportunityResponse(
-                    token_symbol=token_symbol,
-                    token_address=token_address,
-                    chain=chain,
-                    risk_level=risk_level,
-                    recommendation=recommendation,
-                    confidence=confidence,
-                    score=score,
-                    liquidity_usd=liquidity_usd,
-                    age_minutes=int(age_minutes)
-                ))
-                
-                dashboard_server.logger.debug(f"API opportunity: {token_symbol} - Liquidity: {liquidity_usd}")
-                
-            except Exception as opp_error:
-                dashboard_server.logger.error(f"Error processing opportunity for API: {opp_error}")
+            except Exception as e:
+                dashboard_server.logger.warning(f"Skipping malformed opportunity: {e}")
                 continue
-            
+        
+        dashboard_server.logger.debug(f"Returning {len(opportunities)} opportunities")
         return opportunities
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting opportunities: {e}")
+        # Return empty list instead of error to keep dashboard functional
         return []
-
 
 # Watchlist API endpoints
 @app.get("/api/watchlist")

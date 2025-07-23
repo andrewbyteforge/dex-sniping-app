@@ -2186,52 +2186,6 @@
       "last_updated": "2025-07-23T12:32:58.388562"
     },
     {
-      "token_address": "0x6980c54E69530749ab1f9cc13D5304717434A562",
-      "token_symbol": "SBR",
-      "token_name": "Strategic Bitcoin Reserve",
-      "chain": "BASE",
-      "added_at": "2025-07-23T12:33:11.744842",
-      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
-      "score": 0.0,
-      "risk_level": "high",
-      "price_when_added": null,
-      "target_price": null,
-      "stop_loss": null,
-      "status": "watching",
-      "notes": "Generated recommendation: WATCH (NEUTRAL)",
-      "metadata": {
-        "liquidity_usd": 0.0,
-        "dex_name": "BaseSwap",
-        "social_score": 0.13333333333333333,
-        "confidence": null,
-        "action": null
-      },
-      "last_updated": "2025-07-23T12:33:11.744842"
-    },
-    {
-      "token_address": "0x63fc7CE5F02eAa4e07606f30E2eb5f05441fd9a9",
-      "token_symbol": "BORK",
-      "token_name": "Bork on Ethereum",
-      "chain": "BASE",
-      "added_at": "2025-07-23T12:33:49.922363",
-      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
-      "score": 0.0,
-      "risk_level": "high",
-      "price_when_added": null,
-      "target_price": null,
-      "stop_loss": null,
-      "status": "watching",
-      "notes": "Generated recommendation: WATCH (NEUTRAL)",
-      "metadata": {
-        "liquidity_usd": 0.0,
-        "dex_name": "BaseSwap",
-        "social_score": 0.13333333333333333,
-        "confidence": null,
-        "action": null
-      },
-      "last_updated": "2025-07-23T12:33:49.922363"
-    },
-    {
       "token_address": "0xD63dC1412dBa64919711C4C4DB9F501b954531Ed",
       "token_symbol": "GROYPER",
       "token_name": "Groyper",
@@ -2253,7 +2207,76 @@
         "action": null
       },
       "last_updated": "2025-07-23T12:33:58.274991"
+    },
+    {
+      "token_address": "0xf1DE6BA69B05CcD787623c0B4b02C5AdF4331cBc",
+      "token_symbol": "LABUBU",
+      "token_name": "LABUBU",
+      "chain": "BASE",
+      "added_at": "2025-07-23T12:39:27.831734",
+      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.058666666666666666,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T12:39:27.831734"
+    },
+    {
+      "token_address": "0x911783dA7e4A24c0dA2a6f58Be4616C269E7F81b",
+      "token_symbol": "REBO",
+      "token_name": "reborne.fun",
+      "chain": "BASE",
+      "added_at": "2025-07-23T12:39:32.063148",
+      "reason": "Auto-added: Score 0.36, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "high",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "BaseSwap",
+        "social_score": 0.13333333333333333,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T12:39:32.063148"
+    },
+    {
+      "token_address": "0xAd5d4f16261BD362589e7132e4f73D76B310EC6B",
+      "token_symbol": "MERL",
+      "token_name": "Merlin Chain",
+      "chain": "ETHEREUM",
+      "added_at": "2025-07-23T12:40:11.039065",
+      "reason": "Auto-added: Score 0.41, NEUTRAL confidence",
+      "score": 0.0,
+      "risk_level": "medium",
+      "price_when_added": null,
+      "target_price": null,
+      "stop_loss": null,
+      "status": "watching",
+      "notes": "Generated recommendation: WATCH (NEUTRAL)",
+      "metadata": {
+        "liquidity_usd": 0.0,
+        "dex_name": "Uniswap V2",
+        "social_score": 0.13333333333333333,
+        "confidence": null,
+        "action": null
+      },
+      "last_updated": "2025-07-23T12:40:11.039065"
     }
   ],
-  "last_saved": "2025-07-23T12:33:58.274991"
+  "last_saved": "2025-07-23T12:40:11.039065"
 }
