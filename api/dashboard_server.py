@@ -442,6 +442,66 @@ def get_basic_dashboard_html() -> str:
                 border-radius: 10px;
                 padding: 20px;
                 backdrop-filter: blur(10px);
+                margin-bottom: 20px;
+            }
+            
+            .watchlist-panel {
+                background: rgba(255,255,255,0.1);
+                border-radius: 10px;
+                padding: 20px;
+                backdrop-filter: blur(10px);
+            }
+            
+            .watchlist-controls {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 15px;
+                justify-content: flex-end;
+            }
+            
+            .watchlist-item {
+                background: rgba(255,255,255,0.1);
+                margin: 8px 0;
+                padding: 12px;
+                border-radius: 8px;
+                border-left: 4px solid #2196F3;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                transition: all 0.3s ease;
+            }
+            
+            .watchlist-item:hover {
+                background: rgba(255,255,255,0.2);
+                transform: translateY(-1px);
+            }
+            
+            .watchlist-token {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+            }
+            
+            .watchlist-symbol {
+                font-size: 1.1em;
+                font-weight: bold;
+                color: #2196F3;
+            }
+            
+            .watchlist-details {
+                font-size: 0.8em;
+                opacity: 0.8;
+            }
+            
+            .watchlist-actions {
+                display: flex;
+                gap: 5px;
+            }
+            
+            .watchlist-price {
+                color: #4CAF50;
+                font-weight: bold;
+                margin-right: 10px;
             }
             .opportunity-item {
                 background: rgba(255,255,255,0.1);
@@ -755,6 +815,18 @@ def get_basic_dashboard_html() -> str:
                     <p>Connecting to live feed...</p>
                 </div>
             </div>
+            
+            <!-- Watchlist Panel -->
+            <div class="watchlist-panel">
+                <h2>👁️ Watchlist</h2>
+                <div class="watchlist-controls">
+                    <button class="action-btn" onclick="clearWatchlist()">Clear All</button>
+                    <button class="action-btn" onclick="exportWatchlist()">Export</button>
+                </div>
+                <div id="watchlist-list">
+                    <p>No tokens in watchlist...</p>
+                </div>
+            </div>
         </div>
         
         <div id="connection-status" class="connection-status disconnected">
@@ -779,6 +851,30 @@ def get_basic_dashboard_html() -> str:
             let reconnectAttempts = 0;
             const maxReconnectAttempts = 5;
             let opportunities = []; // Store opportunities for details view
+            let watchlist = []; // Store watchlist tokens
+            
+            // Load watchlist from localStorage on startup
+            function loadWatchlist() {
+                try {
+                    const saved = localStorage.getItem('dex_watchlist');
+                    if (saved) {
+                        watchlist = JSON.parse(saved);
+                        renderWatchlist();
+                    }
+                } catch (error) {
+                    console.error('Error loading watchlist:', error);
+                    watchlist = [];
+                }
+            }
+            
+            // Save watchlist to localStorage
+            function saveWatchlist() {
+                try {
+                    localStorage.setItem('dex_watchlist', JSON.stringify(watchlist));
+                } catch (error) {
+                    console.error('Error saving watchlist:', error);
+                }
+            }
             
             function connectWebSocket() {
                 try {
@@ -899,12 +995,20 @@ def get_basic_dashboard_html() -> str:
                 }
             }
             
-            function showTokenDetails(tokenAddress) {
+            function showTokenDetails(tokenAddress, opportunityData = null) {
                 try {
-                    const opportunity = opportunities.find(opp => opp.token_address === tokenAddress);
-                    if (!opportunity) {
-                        showNotification('Opportunity details not found', 'error');
-                        return;
+                    let opportunity;
+                    
+                    if (opportunityData) {
+                        // Use provided data (e.g., from watchlist)
+                        opportunity = opportunityData;
+                    } else {
+                        // Find in current opportunities
+                        opportunity = opportunities.find(opp => opp.token_address === tokenAddress);
+                        if (!opportunity) {
+                            showNotification('Opportunity details not found', 'error');
+                            return;
+                        }
                     }
                     
                     // Update modal title
@@ -1190,6 +1294,7 @@ def get_basic_dashboard_html() -> str:
             
             // Initialize
             try {
+                loadWatchlist(); // Load saved watchlist
                 connectWebSocket();
                 fetchStats();
                 setInterval(fetchStats, 10000); // Update stats every 10 seconds
