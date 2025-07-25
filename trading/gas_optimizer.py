@@ -1,123 +1,146 @@
 """
-Advanced gas optimization strategies for DEX trading.
-Implements dynamic gas pricing, transaction batching, and efficiency improvements.
+Gas optimization system for efficient transaction execution.
+Provides dynamic gas pricing strategies and fee optimization.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
-import statistics
+import aiohttp
 from web3 import Web3
 from web3.types import TxParams, Wei
+import statistics
+import json
 
 from utils.logger import logger_manager
 
 
 class GasStrategy(Enum):
     """Gas pricing strategies."""
-    AGGRESSIVE = "aggressive"  # Higher gas for faster inclusion
-    STANDARD = "standard"      # Market rate
-    PATIENT = "patient"        # Lower gas, wait for inclusion
-    ADAPTIVE = "adaptive"      # Dynamic based on conditions
-    BATCH = "batch"           # Batch multiple transactions
+    ECONOMY = "economy"  # Cheapest, slower
+    STANDARD = "standard"  # Balanced
+    FAST = "fast"  # Higher gas for speed
+    URGENT = "urgent"  # Maximum speed regardless of cost
 
 
 @dataclass
-class GasAnalysis:
-    """Gas market analysis results."""
-    base_fee: Wei
-    priority_fee: Wei
-    estimated_total: Wei
-    inclusion_probability: float
-    estimated_wait_blocks: int
-    gas_limit: int
-    optimization_suggestions: List[str]
+class GasEstimate:
+    """Gas price estimation with confidence intervals."""
+    safe_low: int  # Safe low gas price (gwei)
+    standard: int  # Standard gas price (gwei)
+    fast: int  # Fast gas price (gwei)
+    instant: int  # Instant gas price (gwei)
+    base_fee: int  # Current base fee (gwei)
+    priority_fee_low: int  # Low priority fee (gwei)
+    priority_fee_standard: int  # Standard priority fee (gwei)
+    priority_fee_fast: int  # Fast priority fee (gwei)
+    confidence: float  # Confidence in estimates (0-1)
+    timestamp: datetime
 
 
 @dataclass
 class OptimizedTransaction:
-    """Transaction with gas optimizations applied."""
+    """Optimized transaction with gas savings."""
     original_tx: TxParams
     optimized_tx: TxParams
-    gas_savings: Wei
-    optimization_method: str
-    estimated_inclusion_time: int  # blocks
+    strategy_used: GasStrategy
+    estimated_savings_gwei: int
+    estimated_savings_usd: Decimal
+    gas_savings: int  # Gas units saved
+    time_estimate_seconds: int
+    confidence: float
 
 
 class GasOptimizer:
     """
-    Advanced gas optimization for DEX trading transactions.
-    Reduces costs while maintaining competitive execution speed.
+    Advanced gas optimization system for transaction efficiency.
+    Provides dynamic pricing, network condition analysis, and cost optimization.
     """
     
     def __init__(self) -> None:
-        """Initialize the gas optimization system."""
+        """Initialize gas optimizer."""
         self.logger = logger_manager.get_logger("GasOptimizer")
-        self.w3: Optional[Web3] = None
+        self.web3: Optional[Web3] = None
+        self.initialized = False
         
-        # Gas price history tracking
-        self.gas_history: List[Dict[str, Any]] = []
-        self.max_history_size = 1000
+        # Gas price sources
+        self.gas_apis = {
+            "ethgasstation": "https://ethgasstation.info/api/ethgasAPI.json",
+            "gastrack": "https://api.gastrack.io/gas/price",
+            "blocknative": "https://api.blocknative.com/gasprices/blockprices"
+        }
+        
+        # Network condition tracking
+        self.network_stats = {
+            "current_base_fee": 0,
+            "pending_transactions": 0,
+            "congestion_level": "normal",  # low, normal, high, extreme
+            "average_block_time": 12.0,
+            "mempool_size": 0,
+            "gas_price_trend": "stable"  # rising, falling, stable
+        }
+        
+        # Historical data for trend analysis
+        self.gas_price_history: List[Dict[str, Any]] = []
+        self.max_history_size = 100
         
         # Optimization statistics
-        self.stats = {
-            "transactions_optimized": 0,
-            "total_gas_saved": Wei(0),
-            "average_savings_percentage": 0.0,
-            "successful_inclusions": 0,
-            "failed_inclusions": 0
+        self.optimization_stats = {
+            "total_optimizations": 0,
+            "total_savings_gwei": 0,
+            "total_savings_usd": Decimal("0"),
+            "average_savings_percent": 0.0,
+            "strategy_usage": {strategy.value: 0 for strategy in GasStrategy},
+            "current_base_fee_gwei": 0,
+            "network_congestion": "normal"
         }
         
         # Strategy configurations
         self.strategy_configs = {
-            GasStrategy.AGGRESSIVE: {
-                "priority_multiplier": 1.5,
-                "max_wait_blocks": 1,
-                "retry_escalation": 1.2
+            GasStrategy.ECONOMY: {
+                "base_multiplier": 1.0,
+                "priority_multiplier": 0.5,
+                "max_wait_time": 300  # 5 minutes
             },
             GasStrategy.STANDARD: {
+                "base_multiplier": 1.1,
                 "priority_multiplier": 1.0,
-                "max_wait_blocks": 3,
-                "retry_escalation": 1.1
+                "max_wait_time": 60  # 1 minute
             },
-            GasStrategy.PATIENT: {
-                "priority_multiplier": 0.7,
-                "max_wait_blocks": 10,
-                "retry_escalation": 1.05
+            GasStrategy.FAST: {
+                "base_multiplier": 1.25,
+                "priority_multiplier": 1.5,
+                "max_wait_time": 30  # 30 seconds
             },
-            GasStrategy.ADAPTIVE: {
-                "priority_multiplier": 1.0,  # Dynamically adjusted
-                "max_wait_blocks": 5,
-                "retry_escalation": 1.15
+            GasStrategy.URGENT: {
+                "base_multiplier": 1.5,
+                "priority_multiplier": 2.0,
+                "max_wait_time": 15  # 15 seconds
             }
         }
-        
-        # Transaction batching
-        self.pending_batch: List[TxParams] = []
-        self.batch_timeout = 5  # seconds
-        self.max_batch_size = 5
-        
-    async def initialize(self, w3: Web3) -> None:
+    
+    async def initialize(self, web3: Web3) -> None:
         """
-        Initialize gas optimizer with Web3 connection.
+        Initialize gas optimizer.
         
         Args:
-            w3: Web3 instance for blockchain interaction
+            web3: Web3 connection
         """
         try:
-            self.logger.info("Initializing gas optimization system...")
-            self.w3 = w3
+            self.logger.info("Initializing gas optimizer...")
+            self.web3 = web3
             
-            # Start gas price monitoring
-            asyncio.create_task(self._monitor_gas_prices())
+            # Start network monitoring
+            asyncio.create_task(self._start_network_monitoring())
             
-            # Load historical gas data if available
-            await self._load_gas_history()
+            # Initialize gas price tracking
+            await self._update_gas_estimates()
             
-            self.logger.info("Gas optimizer initialized successfully")
+            self.initialized = True
+            self.logger.info("✅ Gas optimizer initialized")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize gas optimizer: {e}")
@@ -126,469 +149,522 @@ class GasOptimizer:
     async def optimize_transaction(
         self,
         tx_params: TxParams,
-        strategy: GasStrategy = GasStrategy.ADAPTIVE,
-        urgency: float = 0.5  # 0 = patient, 1 = urgent
+        strategy: GasStrategy = GasStrategy.STANDARD,
+        urgency: float = 0.5,
+        max_gas_price_gwei: Optional[int] = None
     ) -> OptimizedTransaction:
         """
-        Optimize gas parameters for a transaction.
+        Optimize transaction gas parameters.
         
         Args:
             tx_params: Original transaction parameters
-            strategy: Gas optimization strategy to use
-            urgency: Transaction urgency (0-1)
+            strategy: Gas optimization strategy
+            urgency: Urgency level (0-1, higher = more urgent)
+            max_gas_price_gwei: Maximum acceptable gas price
             
         Returns:
-            OptimizedTransaction with optimizations applied
+            Optimized transaction with gas savings
         """
         try:
-            self.logger.debug(f"Optimizing transaction with {strategy.value} strategy")
+            if not self.initialized:
+                self.logger.warning("Gas optimizer not initialized")
+                return self._create_fallback_optimization(tx_params, strategy)
             
-            # Analyze current gas market
-            gas_analysis = await self._analyze_gas_market()
+            # Get current gas estimates
+            gas_estimate = await self._get_current_gas_estimate()
             
-            # Apply strategy-specific optimizations
-            if strategy == GasStrategy.BATCH:
-                return await self._optimize_for_batching(tx_params, gas_analysis)
-            else:
-                optimized_tx = await self._apply_gas_strategy(
-                    tx_params, 
-                    gas_analysis, 
-                    strategy, 
-                    urgency
-                )
+            # Adjust strategy based on urgency
+            effective_strategy = self._adjust_strategy_for_urgency(strategy, urgency)
+            
+            # Create optimized transaction
+            optimized_tx = await self._optimize_transaction_params(
+                tx_params, gas_estimate, effective_strategy, max_gas_price_gwei
+            )
             
             # Calculate savings
-            original_cost = self._calculate_gas_cost(tx_params)
-            optimized_cost = self._calculate_gas_cost(optimized_tx)
-            savings = original_cost - optimized_cost
+            savings = self._calculate_savings(tx_params, optimized_tx.optimized_tx)
             
-            self.stats["transactions_optimized"] += 1
-            self.stats["total_gas_saved"] += savings
+            # Update statistics
+            self._update_optimization_stats(effective_strategy, savings)
+            
+            self.logger.info(
+                f"Gas optimization complete: {effective_strategy.value} strategy, "
+                f"savings: {savings['savings_gwei']} gwei (${savings['savings_usd']:.2f})"
+            )
+            
+            return optimized_tx
+            
+        except Exception as e:
+            self.logger.error(f"Gas optimization failed: {e}")
+            return self._create_fallback_optimization(tx_params, strategy)
+    
+    async def _get_current_gas_estimate(self) -> GasEstimate:
+        """Get current gas price estimates from multiple sources."""
+        try:
+            # Get base fee from latest block
+            latest_block = await self.web3.eth.get_block("latest")
+            base_fee_wei = latest_block.get("baseFeePerGas", 20_000_000_000)
+            base_fee_gwei = int(base_fee_wei / 1_000_000_000)
+            
+            # Get estimates from APIs
+            api_estimates = await self._fetch_gas_estimates_from_apis()
+            
+            # Combine estimates
+            if api_estimates:
+                # Use API data if available
+                fast_gwei = api_estimates.get("fast", base_fee_gwei + 2)
+                standard_gwei = api_estimates.get("standard", base_fee_gwei + 1)
+                safe_low_gwei = api_estimates.get("safe_low", base_fee_gwei)
+            else:
+                # Fallback to calculated estimates
+                fast_gwei = base_fee_gwei + 3
+                standard_gwei = base_fee_gwei + 2
+                safe_low_gwei = base_fee_gwei + 1
+            
+            # Calculate priority fees
+            priority_fee_fast = max(3, int((fast_gwei - base_fee_gwei) * 1.2))
+            priority_fee_standard = max(2, fast_gwei - base_fee_gwei)
+            priority_fee_low = max(1, int((fast_gwei - base_fee_gwei) * 0.8))
+            
+            return GasEstimate(
+                safe_low=safe_low_gwei,
+                standard=standard_gwei,
+                fast=fast_gwei,
+                instant=fast_gwei + 5,
+                base_fee=base_fee_gwei,
+                priority_fee_low=priority_fee_low,
+                priority_fee_standard=priority_fee_standard,
+                priority_fee_fast=priority_fee_fast,
+                confidence=0.8 if api_estimates else 0.6,
+                timestamp=datetime.now()
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Gas estimate failed: {e}")
+            return self._create_fallback_gas_estimate()
+    
+    async def _fetch_gas_estimates_from_apis(self) -> Dict[str, int]:
+        """Fetch gas estimates from external APIs."""
+        estimates = {}
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Try multiple sources and take median
+                results = []
+                
+                for api_name, url in self.gas_apis.items():
+                    try:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                parsed = self._parse_gas_api_response(api_name, data)
+                                if parsed:
+                                    results.append(parsed)
+                    except Exception as e:
+                        self.logger.debug(f"Gas API {api_name} failed: {e}")
+                
+                # Calculate median estimates
+                if results:
+                    estimates["safe_low"] = int(statistics.median([r["safe_low"] for r in results]))
+                    estimates["standard"] = int(statistics.median([r["standard"] for r in results]))
+                    estimates["fast"] = int(statistics.median([r["fast"] for r in results]))
+                    
+        except Exception as e:
+            self.logger.debug(f"Gas API fetch failed: {e}")
+        
+        return estimates
+    
+    def _parse_gas_api_response(self, api_name: str, data: Dict[str, Any]) -> Optional[Dict[str, int]]:
+        """Parse gas API response to standard format."""
+        try:
+            if api_name == "ethgasstation":
+                return {
+                    "safe_low": int(data.get("safeLow", 20)),
+                    "standard": int(data.get("standard", 25)),
+                    "fast": int(data.get("fast", 30))
+                }
+            elif api_name == "gastrack":
+                return {
+                    "safe_low": int(data.get("slow", 20)),
+                    "standard": int(data.get("normal", 25)),
+                    "fast": int(data.get("fast", 30))
+                }
+            # Add more API parsers as needed
+            
+        except Exception as e:
+            self.logger.debug(f"Failed to parse {api_name} response: {e}")
+        
+        return None
+    
+    def _adjust_strategy_for_urgency(self, strategy: GasStrategy, urgency: float) -> GasStrategy:
+        """Adjust gas strategy based on urgency level."""
+        if urgency >= 0.9:
+            return GasStrategy.URGENT
+        elif urgency >= 0.7:
+            return max(strategy, GasStrategy.FAST)
+        elif urgency >= 0.4:
+            return max(strategy, GasStrategy.STANDARD) if strategy != GasStrategy.ECONOMY else strategy
+        else:
+            return strategy
+    
+    async def _optimize_transaction_params(
+        self,
+        tx_params: TxParams,
+        gas_estimate: GasEstimate,
+        strategy: GasStrategy,
+        max_gas_price_gwei: Optional[int]
+    ) -> OptimizedTransaction:
+        """Optimize transaction parameters based on strategy."""
+        try:
+            config = self.strategy_configs[strategy]
+            optimized_tx = tx_params.copy()
+            
+            # Determine if we should use EIP-1559 or legacy
+            use_eip1559 = self._should_use_eip1559(tx_params)
+            
+            if use_eip1559:
+                # EIP-1559 optimization
+                base_fee = gas_estimate.base_fee
+                
+                if strategy == GasStrategy.ECONOMY:
+                    max_fee = base_fee + gas_estimate.priority_fee_low
+                    priority_fee = gas_estimate.priority_fee_low
+                elif strategy == GasStrategy.STANDARD:
+                    max_fee = base_fee + gas_estimate.priority_fee_standard
+                    priority_fee = gas_estimate.priority_fee_standard
+                elif strategy == GasStrategy.FAST:
+                    max_fee = base_fee + gas_estimate.priority_fee_fast
+                    priority_fee = gas_estimate.priority_fee_fast
+                else:  # URGENT
+                    max_fee = (base_fee * 2) + gas_estimate.priority_fee_fast
+                    priority_fee = gas_estimate.priority_fee_fast * 2
+                
+                # Apply max gas price limit
+                if max_gas_price_gwei and max_fee > max_gas_price_gwei:
+                    max_fee = max_gas_price_gwei
+                    priority_fee = min(priority_fee, max_gas_price_gwei - base_fee)
+                
+                optimized_tx["type"] = "0x2"
+                optimized_tx["maxFeePerGas"] = max_fee * 1_000_000_000  # Convert to wei
+                optimized_tx["maxPriorityFeePerGas"] = priority_fee * 1_000_000_000
+                optimized_tx.pop("gasPrice", None)  # Remove legacy gas price
+                
+            else:
+                # Legacy transaction optimization
+                if strategy == GasStrategy.ECONOMY:
+                    gas_price = gas_estimate.safe_low
+                elif strategy == GasStrategy.STANDARD:
+                    gas_price = gas_estimate.standard
+                elif strategy == GasStrategy.FAST:
+                    gas_price = gas_estimate.fast
+                else:  # URGENT
+                    gas_price = gas_estimate.instant
+                
+                # Apply max gas price limit
+                if max_gas_price_gwei and gas_price > max_gas_price_gwei:
+                    gas_price = max_gas_price_gwei
+                
+                optimized_tx["gasPrice"] = gas_price * 1_000_000_000  # Convert to wei
+                optimized_tx.pop("type", None)
+                optimized_tx.pop("maxFeePerGas", None)
+                optimized_tx.pop("maxPriorityFeePerGas", None)
+            
+            # Optimize gas limit
+            optimized_gas_limit = await self._optimize_gas_limit(optimized_tx)
+            if optimized_gas_limit:
+                optimized_tx["gas"] = optimized_gas_limit
+            
+            # Calculate savings and time estimate
+            savings = self._calculate_savings(tx_params, optimized_tx)
+            time_estimate = self._estimate_confirmation_time(strategy)
             
             return OptimizedTransaction(
                 original_tx=tx_params,
                 optimized_tx=optimized_tx,
-                gas_savings=savings,
-                optimization_method=strategy.value,
-                estimated_inclusion_time=gas_analysis.estimated_wait_blocks
+                strategy_used=strategy,
+                estimated_savings_gwei=savings["savings_gwei"],
+                estimated_savings_usd=savings["savings_usd"],
+                gas_savings=savings["gas_units_saved"],
+                time_estimate_seconds=time_estimate,
+                confidence=gas_estimate.confidence
             )
             
         except Exception as e:
-            self.logger.error(f"Failed to optimize transaction: {e}")
-            # Return original transaction if optimization fails
-            return OptimizedTransaction(
-                original_tx=tx_params,
-                optimized_tx=tx_params,
-                gas_savings=Wei(0),
-                optimization_method="none",
-                estimated_inclusion_time=1
-            )
+            self.logger.error(f"Transaction optimization failed: {e}")
+            raise
     
-    async def estimate_optimal_gas(
-        self,
-        tx_params: TxParams,
-        target_inclusion_blocks: int = 2
-    ) -> GasAnalysis:
-        """
-        Estimate optimal gas price for target inclusion time.
+    def _should_use_eip1559(self, tx_params: TxParams) -> bool:
+        """Determine if transaction should use EIP-1559."""
+        # Use EIP-1559 if not explicitly set to legacy
+        return tx_params.get("type") != "0x0" and "gasPrice" not in tx_params
+    
+    async def _optimize_gas_limit(self, tx_params: TxParams) -> Optional[int]:
+        """Optimize gas limit for transaction."""
+        try:
+            # Estimate gas usage
+            estimated_gas = await self.web3.eth.estimate_gas(tx_params)
+            
+            # Add buffer (10-20% depending on complexity)
+            buffer_percent = 0.15  # 15% buffer
+            optimized_limit = int(estimated_gas * (1 + buffer_percent))
+            
+            # Ensure it's not less than original limit
+            original_limit = tx_params.get("gas", 0)
+            if original_limit > 0:
+                optimized_limit = max(optimized_limit, original_limit)
+            
+            return optimized_limit
+            
+        except Exception as e:
+            self.logger.debug(f"Gas limit optimization failed: {e}")
+            return None
+    
+    def _calculate_savings(self, original_tx: TxParams, optimized_tx: TxParams) -> Dict[str, Any]:
+        """Calculate gas savings from optimization."""
+        try:
+            # Calculate original cost
+            original_gas_price = self._get_effective_gas_price(original_tx)
+            original_gas_limit = original_tx.get("gas", 300000)
+            original_cost_wei = original_gas_price * original_gas_limit
+            
+            # Calculate optimized cost
+            optimized_gas_price = self._get_effective_gas_price(optimized_tx)
+            optimized_gas_limit = optimized_tx.get("gas", 300000)
+            optimized_cost_wei = optimized_gas_price * optimized_gas_limit
+            
+            # Calculate savings
+            savings_wei = max(0, original_cost_wei - optimized_cost_wei)
+            savings_gwei = int(savings_wei / 1_000_000_000)
+            
+            # Convert to USD (simplified - would use real ETH price)
+            eth_price_usd = Decimal("2000")  # Placeholder
+            savings_eth = Decimal(str(savings_wei)) / Decimal("1e18")
+            savings_usd = savings_eth * eth_price_usd
+            
+            gas_units_saved = max(0, original_gas_limit - optimized_gas_limit)
+            
+            return {
+                "savings_gwei": savings_gwei,
+                "savings_usd": savings_usd,
+                "gas_units_saved": gas_units_saved,
+                "percent_saved": (savings_wei / original_cost_wei * 100) if original_cost_wei > 0 else 0
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Savings calculation failed: {e}")
+            return {
+                "savings_gwei": 0,
+                "savings_usd": Decimal("0"),
+                "gas_units_saved": 0,
+                "percent_saved": 0
+            }
+    
+    def _get_effective_gas_price(self, tx_params: TxParams) -> int:
+        """Get effective gas price from transaction parameters."""
+        if "gasPrice" in tx_params:
+            return tx_params["gasPrice"]
+        elif "maxFeePerGas" in tx_params:
+            return tx_params["maxFeePerGas"]
+        else:
+            return 20_000_000_000  # Default 20 gwei
+    
+    def _estimate_confirmation_time(self, strategy: GasStrategy) -> int:
+        """Estimate confirmation time for strategy."""
+        config = self.strategy_configs[strategy]
         
-        Args:
-            tx_params: Transaction parameters
-            target_inclusion_blocks: Desired inclusion within N blocks
-            
-        Returns:
-            GasAnalysis with recommendations
-        """
-        try:
-            # Get current gas market data
-            analysis = await self._analyze_gas_market()
-            
-            # Adjust for target inclusion time
-            if target_inclusion_blocks <= 1:
-                # Need aggressive pricing
-                analysis.priority_fee = Wei(int(analysis.priority_fee * 1.5))
-                analysis.optimization_suggestions.append("Use aggressive gas pricing for fast inclusion")
-            elif target_inclusion_blocks >= 5:
-                # Can use patient pricing
-                analysis.priority_fee = Wei(int(analysis.priority_fee * 0.7))
-                analysis.optimization_suggestions.append("Use patient gas pricing to save costs")
-            
-            # Estimate gas limit
-            if "data" in tx_params and tx_params["data"]:
-                # Complex transaction, estimate higher
-                estimated_gas = await self._estimate_gas_usage(tx_params)
-                analysis.gas_limit = int(estimated_gas * 1.1)  # 10% buffer
-            
-            # Calculate total estimated cost
-            analysis.estimated_total = Wei(
-                (analysis.base_fee + analysis.priority_fee) * analysis.gas_limit
-            )
-            
-            return analysis
-            
-        except Exception as e:
-            self.logger.error(f"Failed to estimate optimal gas: {e}")
-            return self._get_fallback_gas_analysis()
-    
-    async def batch_transactions(
-        self,
-        transactions: List[TxParams]
-    ) -> List[OptimizedTransaction]:
-        """
-        Batch multiple transactions for gas efficiency.
+        # Adjust based on network congestion
+        base_time = config["max_wait_time"]
+        congestion = self.network_stats["congestion_level"]
         
-        Args:
-            transactions: List of transactions to batch
-            
-        Returns:
-            List of optimized transactions
-        """
-        try:
-            self.logger.info(f"Batching {len(transactions)} transactions")
-            
-            # Group transactions by target
-            batches = self._group_transactions_for_batching(transactions)
-            optimized_txs = []
-            
-            for batch in batches:
-                if len(batch) > 1:
-                    # Create multicall transaction
-                    multicall_tx = await self._create_multicall_transaction(batch)
-                    
-                    # Optimize the multicall
-                    optimized = await self.optimize_transaction(
-                        multicall_tx,
-                        strategy=GasStrategy.STANDARD
-                    )
-                    optimized_txs.append(optimized)
-                else:
-                    # Single transaction, optimize normally
-                    optimized = await self.optimize_transaction(
-                        batch[0],
-                        strategy=GasStrategy.ADAPTIVE
-                    )
-                    optimized_txs.append(optimized)
-            
-            return optimized_txs
-            
-        except Exception as e:
-            self.logger.error(f"Failed to batch transactions: {e}")
-            # Fall back to individual optimization
-            return [
-                await self.optimize_transaction(tx, GasStrategy.STANDARD)
-                for tx in transactions
-            ]
+        if congestion == "extreme":
+            return base_time * 3
+        elif congestion == "high":
+            return base_time * 2
+        elif congestion == "low":
+            return max(15, base_time // 2)
+        else:
+            return base_time
     
-    async def _analyze_gas_market(self) -> GasAnalysis:
-        """Analyze current gas market conditions."""
-        try:
-            # Get latest block
-            latest_block = self.w3.eth.get_block('latest')
-            base_fee = latest_block.get('baseFeePerGas', Wei(0))
-            
-            # Calculate priority fee from recent transactions
-            priority_fees = await self._get_recent_priority_fees()
-            
-            # Use 60th percentile for standard inclusion
-            priority_fee = Wei(int(statistics.quantile(priority_fees, 0.6)))
-            
-            # Estimate inclusion probability
-            inclusion_prob = self._estimate_inclusion_probability(
-                base_fee + priority_fee
-            )
-            
-            # Estimate wait time
-            wait_blocks = self._estimate_wait_blocks(inclusion_prob)
-            
-            suggestions = []
-            
-            # Provide optimization suggestions
-            if base_fee > Wei(100 * 10**9):  # > 100 gwei
-                suggestions.append("High network congestion - consider delaying non-urgent transactions")
-            
-            if len(self.gas_history) > 100:
-                avg_base_fee = statistics.mean([h['base_fee'] for h in self.gas_history[-100:]])
-                if base_fee < avg_base_fee * 0.8:
-                    suggestions.append("Gas prices below average - good time for transactions")
-            
-            return GasAnalysis(
-                base_fee=base_fee,
-                priority_fee=priority_fee,
-                estimated_total=base_fee + priority_fee,
-                inclusion_probability=inclusion_prob,
-                estimated_wait_blocks=wait_blocks,
-                gas_limit=21000,  # Default, will be updated
-                optimization_suggestions=suggestions
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Gas market analysis failed: {e}")
-            return self._get_fallback_gas_analysis()
-    
-    async def _apply_gas_strategy(
+    def _create_fallback_optimization(
         self,
         tx_params: TxParams,
-        gas_analysis: GasAnalysis,
-        strategy: GasStrategy,
-        urgency: float
-    ) -> TxParams:
-        """Apply specific gas strategy to transaction."""
-        try:
-            optimized = tx_params.copy()
-            config = self.strategy_configs[strategy]
-            
-            # Calculate gas prices based on strategy
-            if strategy == GasStrategy.ADAPTIVE:
-                # Dynamically adjust based on urgency and market
-                multiplier = 0.7 + (urgency * 0.8)  # 0.7x to 1.5x
-                priority_fee = Wei(int(gas_analysis.priority_fee * multiplier))
-            else:
-                priority_fee = Wei(
-                    int(gas_analysis.priority_fee * config["priority_multiplier"])
-                )
-            
-            # Set EIP-1559 gas parameters
-            optimized["maxFeePerGas"] = Wei(gas_analysis.base_fee * 2 + priority_fee)
-            optimized["maxPriorityFeePerGas"] = priority_fee
-            
-            # Optimize gas limit
-            if "gas" not in optimized:
-                estimated_gas = await self._estimate_gas_usage(tx_params)
-                # Add buffer based on strategy
-                buffer = 1.05 if strategy == GasStrategy.PATIENT else 1.1
-                optimized["gas"] = int(estimated_gas * buffer)
-            
-            # Remove legacy gas price if present
-            if "gasPrice" in optimized:
-                del optimized["gasPrice"]
-            
-            return optimized
-            
-        except Exception as e:
-            self.logger.error(f"Failed to apply gas strategy: {e}")
-            return tx_params
-    
-    async def _optimize_for_batching(
-        self,
-        tx_params: TxParams,
-        gas_analysis: GasAnalysis
+        strategy: GasStrategy
     ) -> OptimizedTransaction:
-        """Optimize transaction for batching."""
-        try:
-            # Add to pending batch
-            self.pending_batch.append(tx_params)
-            
-            # Check if batch should be sent
-            should_send = (
-                len(self.pending_batch) >= self.max_batch_size or
-                self._is_batch_timeout()
-            )
-            
-            if should_send:
-                # Create and optimize batch transaction
-                batch_tx = await self._create_multicall_transaction(self.pending_batch)
-                self.pending_batch = []
-                
-                return await self.optimize_transaction(
-                    batch_tx,
-                    strategy=GasStrategy.STANDARD
-                )
-            else:
-                # Return placeholder for now
-                return OptimizedTransaction(
-                    original_tx=tx_params,
-                    optimized_tx=tx_params,
-                    gas_savings=Wei(0),
-                    optimization_method="pending_batch",
-                    estimated_inclusion_time=0
-                )
-                
-        except Exception as e:
-            self.logger.error(f"Batch optimization failed: {e}")
-            return await self.optimize_transaction(tx_params, GasStrategy.STANDARD)
-    
-    async def _monitor_gas_prices(self) -> None:
-        """Monitor gas prices continuously."""
-        while True:
-            try:
-                latest_block = self.w3.eth.get_block('latest')
-                
-                gas_data = {
-                    "timestamp": datetime.now(),
-                    "block_number": latest_block['number'],
-                    "base_fee": latest_block.get('baseFeePerGas', 0),
-                    "gas_used": latest_block['gasUsed'],
-                    "gas_limit": latest_block['gasLimit']
-                }
-                
-                self.gas_history.append(gas_data)
-                
-                # Trim history if too large
-                if len(self.gas_history) > self.max_history_size:
-                    self.gas_history = self.gas_history[-self.max_history_size:]
-                
-                # Wait for next block
-                await asyncio.sleep(12)  # ~1 block time
-                
-            except Exception as e:
-                self.logger.error(f"Gas monitoring error: {e}")
-                await asyncio.sleep(30)
-    
-    async def _get_recent_priority_fees(self) -> List[Wei]:
-        """Get priority fees from recent transactions."""
-        try:
-            latest_block = self.w3.eth.get_block('latest', full_transactions=True)
-            priority_fees = []
-            
-            for tx in latest_block['transactions'][:20]:  # Sample 20 transactions
-                if 'maxPriorityFeePerGas' in tx:
-                    priority_fees.append(tx['maxPriorityFeePerGas'])
-                elif 'gasPrice' in tx and 'baseFeePerGas' in latest_block:
-                    # Calculate priority fee from legacy transaction
-                    priority = tx['gasPrice'] - latest_block['baseFeePerGas']
-                    if priority > 0:
-                        priority_fees.append(Wei(priority))
-            
-            # Ensure we have some data
-            if not priority_fees:
-                priority_fees = [Wei(2 * 10**9)]  # Default 2 gwei
-            
-            return priority_fees
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get recent priority fees: {e}")
-            return [Wei(2 * 10**9)]  # Default fallback
-    
-    def _estimate_inclusion_probability(self, total_fee: Wei) -> float:
-        """Estimate probability of inclusion based on fee."""
-        try:
-            if not self.gas_history:
-                return 0.5
-            
-            # Compare to recent included transactions
-            recent_fees = [h['base_fee'] for h in self.gas_history[-50:]]
-            percentile = statistics.quantiles(recent_fees, n=100)
-            
-            # Find position in distribution
-            position = 0
-            for i, fee in enumerate(percentile):
-                if total_fee >= fee:
-                    position = i + 1
-                else:
-                    break
-            
-            return position / 100
-            
-        except Exception:
-            return 0.5
-    
-    def _estimate_wait_blocks(self, inclusion_probability: float) -> int:
-        """Estimate blocks to wait based on inclusion probability."""
-        if inclusion_probability >= 0.9:
-            return 1
-        elif inclusion_probability >= 0.7:
-            return 2
-        elif inclusion_probability >= 0.5:
-            return 3
-        elif inclusion_probability >= 0.3:
-            return 5
-        else:
-            return 10
-    
-    async def _estimate_gas_usage(self, tx_params: TxParams) -> int:
-        """Estimate gas usage for transaction."""
-        try:
-            # Use eth_estimateGas
-            estimated = self.w3.eth.estimate_gas(tx_params)
-            return estimated
-        except Exception:
-            # Fallback estimates based on transaction type
-            if tx_params.get("data"):
-                return 200000  # Contract interaction
-            else:
-                return 21000   # Simple transfer
-    
-    def _calculate_gas_cost(self, tx_params: TxParams) -> Wei:
-        """Calculate total gas cost for transaction."""
-        gas_limit = tx_params.get("gas", 21000)
+        """Create fallback optimization when APIs fail."""
+        optimized_tx = tx_params.copy()
         
-        if "maxFeePerGas" in tx_params:
-            return Wei(gas_limit * tx_params["maxFeePerGas"])
-        elif "gasPrice" in tx_params:
-            return Wei(gas_limit * tx_params["gasPrice"])
-        else:
-            return Wei(0)
-    
-    def _group_transactions_for_batching(
-        self, 
-        transactions: List[TxParams]
-    ) -> List[List[TxParams]]:
-        """Group transactions that can be batched together."""
-        # Group by target contract
-        groups: Dict[str, List[TxParams]] = {}
+        # Simple fallback gas pricing
+        if strategy == GasStrategy.ECONOMY:
+            gas_price = 20_000_000_000  # 20 gwei
+        elif strategy == GasStrategy.STANDARD:
+            gas_price = 25_000_000_000  # 25 gwei
+        elif strategy == GasStrategy.FAST:
+            gas_price = 35_000_000_000  # 35 gwei
+        else:  # URGENT
+            gas_price = 50_000_000_000  # 50 gwei
         
-        for tx in transactions:
-            target = tx.get("to", "unknown")
-            if target not in groups:
-                groups[target] = []
-            groups[target].append(tx)
+        optimized_tx["gasPrice"] = gas_price
         
-        # Convert to list of batches
-        batches = []
-        for group in groups.values():
-            # Split large groups
-            for i in range(0, len(group), self.max_batch_size):
-                batches.append(group[i:i + self.max_batch_size])
-        
-        return batches
-    
-    async def _create_multicall_transaction(
-        self, 
-        transactions: List[TxParams]
-    ) -> TxParams:
-        """Create a multicall transaction from multiple transactions."""
-        # This would implement actual multicall encoding
-        # For now, return first transaction as placeholder
-        return transactions[0] if transactions else {}
-    
-    def _is_batch_timeout(self) -> bool:
-        """Check if batch timeout has been reached."""
-        # Implement batch timeout logic
-        return False
-    
-    async def _load_gas_history(self) -> None:
-        """Load historical gas data."""
-        # This would load from persistent storage
-        pass
-    
-    def _get_fallback_gas_analysis(self) -> GasAnalysis:
-        """Get fallback gas analysis when real analysis fails."""
-        return GasAnalysis(
-            base_fee=Wei(30 * 10**9),  # 30 gwei
-            priority_fee=Wei(2 * 10**9),  # 2 gwei
-            estimated_total=Wei(32 * 10**9),
-            inclusion_probability=0.5,
-            estimated_wait_blocks=3,
-            gas_limit=200000,
-            optimization_suggestions=["Using fallback gas estimates"]
+        return OptimizedTransaction(
+            original_tx=tx_params,
+            optimized_tx=optimized_tx,
+            strategy_used=strategy,
+            estimated_savings_gwei=0,
+            estimated_savings_usd=Decimal("0"),
+            gas_savings=0,
+            time_estimate_seconds=60,
+            confidence=0.5
         )
+    
+    def _create_fallback_gas_estimate(self) -> GasEstimate:
+        """Create fallback gas estimate when APIs fail."""
+        return GasEstimate(
+            safe_low=20,
+            standard=25,
+            fast=35,
+            instant=50,
+            base_fee=18,
+            priority_fee_low=2,
+            priority_fee_standard=5,
+            priority_fee_fast=10,
+            confidence=0.3,
+            timestamp=datetime.now()
+        )
+    
+    async def _start_network_monitoring(self) -> None:
+        """Start monitoring network conditions."""
+        try:
+            self.logger.info("Starting network monitoring...")
+            
+            while self.initialized:
+                try:
+                    await self._update_network_stats()
+                    await self._update_gas_estimates()
+                    await asyncio.sleep(30)  # Update every 30 seconds
+                    
+                except Exception as e:
+                    self.logger.error(f"Network monitoring error: {e}")
+                    await asyncio.sleep(60)
+                    
+        except Exception as e:
+            self.logger.error(f"Network monitoring failed: {e}")
+    
+    async def _update_network_stats(self) -> None:
+        """Update network condition statistics."""
+        try:
+            # Get latest block info
+            latest_block = await self.web3.eth.get_block("latest")
+            
+            # Update base fee
+            base_fee_wei = latest_block.get("baseFeePerGas", 0)
+            self.network_stats["current_base_fee"] = base_fee_wei // 1_000_000_000
+            
+            # Get pending transaction count
+            pending_count = await self.web3.eth.get_block_transaction_count("pending")
+            self.network_stats["pending_transactions"] = pending_count
+            
+            # Estimate congestion level
+            self._update_congestion_level()
+            
+            # Update optimization stats
+            self.optimization_stats["current_base_fee_gwei"] = self.network_stats["current_base_fee"]
+            self.optimization_stats["network_congestion"] = self.network_stats["congestion_level"]
+            
+        except Exception as e:
+            self.logger.debug(f"Network stats update failed: {e}")
+    
+    def _update_congestion_level(self) -> None:
+        """Update network congestion assessment."""
+        try:
+            base_fee = self.network_stats["current_base_fee"]
+            pending_txs = self.network_stats["pending_transactions"]
+            
+            # Simple congestion heuristics
+            if base_fee > 100 or pending_txs > 200000:
+                congestion = "extreme"
+            elif base_fee > 50 or pending_txs > 100000:
+                congestion = "high"
+            elif base_fee < 20 and pending_txs < 50000:
+                congestion = "low"
+            else:
+                congestion = "normal"
+            
+            self.network_stats["congestion_level"] = congestion
+            
+        except Exception as e:
+            self.logger.debug(f"Congestion level update failed: {e}")
+    
+    async def _update_gas_estimates(self) -> None:
+        """Update gas price estimates and history."""
+        try:
+            gas_estimate = await self._get_current_gas_estimate()
+            
+            # Add to history
+            self.gas_price_history.append({
+                "timestamp": gas_estimate.timestamp,
+                "base_fee": gas_estimate.base_fee,
+                "standard": gas_estimate.standard,
+                "fast": gas_estimate.fast
+            })
+            
+            # Trim history
+            if len(self.gas_price_history) > self.max_history_size:
+                self.gas_price_history.pop(0)
+            
+            # Update trend
+            self._update_gas_price_trend()
+            
+        except Exception as e:
+            self.logger.debug(f"Gas estimates update failed: {e}")
+    
+    def _update_gas_price_trend(self) -> None:
+        """Analyze gas price trends."""
+        try:
+            if len(self.gas_price_history) < 10:
+                return
+            
+            recent_prices = [entry["standard"] for entry in self.gas_price_history[-10:]]
+            older_prices = [entry["standard"] for entry in self.gas_price_history[-20:-10]]
+            
+            if not older_prices:
+                return
+            
+            recent_avg = statistics.mean(recent_prices)
+            older_avg = statistics.mean(older_prices)
+            
+            if recent_avg > older_avg * 1.1:
+                self.network_stats["gas_price_trend"] = "rising"
+            elif recent_avg < older_avg * 0.9:
+                self.network_stats["gas_price_trend"] = "falling"
+            else:
+                self.network_stats["gas_price_trend"] = "stable"
+                
+        except Exception as e:
+            self.logger.debug(f"Trend analysis failed: {e}")
+    
+    def _update_optimization_stats(self, strategy: GasStrategy, savings: Dict[str, Any]) -> None:
+        """Update optimization statistics."""
+        try:
+            self.optimization_stats["total_optimizations"] += 1
+            self.optimization_stats["total_savings_gwei"] += savings["savings_gwei"]
+            self.optimization_stats["total_savings_usd"] += savings["savings_usd"]
+            self.optimization_stats["strategy_usage"][strategy.value] += 1
+            
+            # Update average savings
+            if self.optimization_stats["total_optimizations"] > 0:
+                self.optimization_stats["average_savings_percent"] = (
+                    savings["percent_saved"] + 
+                    self.optimization_stats["average_savings_percent"] * 
+                    (self.optimization_stats["total_optimizations"] - 1)
+                ) / self.optimization_stats["total_optimizations"]
+                
+        except Exception as e:
+            self.logger.debug(f"Stats update failed: {e}")
     
     def get_optimization_stats(self) -> Dict[str, Any]:
         """Get gas optimization statistics."""
-        total_optimized = self.stats["transactions_optimized"]
-        
-        return {
-            "transactions_optimized": total_optimized,
-            "total_gas_saved_gwei": self.w3.from_wei(self.stats["total_gas_saved"], "gwei"),
-            "average_savings_percentage": (
-                self.stats["average_savings_percentage"] if total_optimized > 0 else 0
-            ),
-            "success_rate": (
-                self.stats["successful_inclusions"] / 
-                max(self.stats["successful_inclusions"] + self.stats["failed_inclusions"], 1)
-            ),
-            "current_base_fee_gwei": (
-                self.w3.from_wei(self.gas_history[-1]["base_fee"], "gwei") 
-                if self.gas_history else 0
-            )
-        }
+        return self.optimization_stats.copy()
+    
+    def get_network_conditions(self) -> Dict[str, Any]:
+        """Get current network conditions."""
+        return self.network_stats.copy()
