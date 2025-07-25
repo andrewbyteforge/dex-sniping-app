@@ -3773,29 +3773,6 @@
       "last_updated": "2025-07-23T19:08:33.568839"
     },
     {
-      "token_address": "0x69d777ac1253Ff016995E431F0d30ac752f80C17",
-      "token_symbol": "🐯TIGERX",
-      "token_name": "🐯TIGERX",
-      "chain": "BASE",
-      "added_at": "2025-07-23T19:08:40.149994",
-      "reason": "Auto-added: Score 0.34, NEUTRAL confidence",
-      "score": 0.0,
-      "risk_level": "high",
-      "price_when_added": null,
-      "target_price": null,
-      "stop_loss": null,
-      "status": "watching",
-      "notes": "Generated recommendation: WATCH (NEUTRAL)",
-      "metadata": {
-        "liquidity_usd": 0.0,
-        "dex_name": "BaseSwap",
-        "social_score": 0.058666666666666666,
-        "confidence": null,
-        "action": null
-      },
-      "last_updated": "2025-07-23T19:08:40.149994"
-    },
-    {
       "token_address": "0xd04B565F7a93f675cC1b85d89a6d40F874735881",
       "token_symbol": "👑KINGCOIN",
       "token_name": "👑KINGCOIN",
@@ -3819,5 +3796,5 @@
       "last_updated": "2025-07-23T19:08:43.388047"
     }
   ],
-  "last_saved": "2025-07-23T19:08:43.388047"
+  "last_saved": "2025-07-25T18:22:18.075157"
 }

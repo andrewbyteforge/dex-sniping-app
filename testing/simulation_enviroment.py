@@ -1,6 +1,9 @@
+#!/usr/bin/env python3
 """
 Simulation environment for testing trading strategies without real execution.
 Provides historical data replay, backtesting, and strategy validation.
+
+File: testing/simulation_enviroment.py
 """
 
 import asyncio
@@ -13,7 +16,8 @@ from enum import Enum
 import random
 
 from models.token import TokenInfo, LiquidityInfo, TradingOpportunity, RiskLevel
-from trading.executor import TradeOrder, TradeResult, TradeType, TradeStatus
+# Fix: Import from execution_engine instead of non-existent executor
+from trading.execution_engine import TradeOrder, ExecutionResult, OrderType, OrderStatus
 from trading.risk_manager import RiskManager, PositionSizeResult
 from trading.position_manager import PositionManager
 from utils.logger import logger_manager
@@ -156,391 +160,412 @@ class SimulationEnvironment:
         Initialize simulation with components to test.
         
         Args:
-            risk_manager: Risk manager to test
-            position_manager: Position manager to test
-            strategy_callback: Strategy function to test
+            risk_manager: Risk management system to test
+            position_manager: Position management system to test
+            strategy_callback: Trading strategy to test
         """
         try:
-            self.logger.info("Initializing Simulation Environment...")
+            self.logger.info("Initializing simulation environment...")
             
             self.risk_manager = risk_manager
             self.position_manager = position_manager
             self.strategy_callback = strategy_callback
             
-            # Initialize market data
-            if self.config.mode == SimulationMode.HISTORICAL:
-                await self._load_historical_data()
-            else:
-                await self._generate_synthetic_data()
+            # Initialize starting tokens
+            await self._initialize_simulation_tokens()
             
-            # Record initial balance
-            self.balance_history.append((self.current_time, self.balance))
+            # Initialize market conditions
+            await self._initialize_market_conditions()
             
-            self.logger.info(
-                f"✅ Simulation initialized with {len(self.simulated_tokens)} tokens"
-            )
+            self.logger.info("✅ Simulation environment initialized")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize simulation: {e}")
+            self.logger.error(f"Failed to initialize simulation environment: {e}")
             raise
-    
-    async def _generate_synthetic_data(self) -> None:
-        """Generate synthetic market data for testing."""
-        # Generate diverse token scenarios
-        scenarios = [
-            # Successful tokens
-            {'name': 'MoonToken', 'success_rate': 0.9, 'volatility': 0.3},
-            {'name': 'RocketCoin', 'success_rate': 0.8, 'volatility': 0.5},
-            {'name': 'DiamondHands', 'success_rate': 0.7, 'volatility': 0.4},
-            
-            # Rugpulls
-            {'name': 'ScamCoin', 'success_rate': 0.0, 'volatility': 0.8},
-            {'name': 'PumpDump', 'success_rate': 0.1, 'volatility': 0.9},
-            
-            # Moderate performers
-            {'name': 'SteadyGrowth', 'success_rate': 0.5, 'volatility': 0.2},
-            {'name': 'NormalToken', 'success_rate': 0.4, 'volatility': 0.3},
-        ]
-        
-        for i, scenario in enumerate(scenarios):
-            token = self._create_synthetic_token(
-                address=f"0x{i:040x}",
-                **scenario
-            )
-            self.simulated_tokens[token.token_info.address] = token
-    
-    def _create_synthetic_token(
+
+    async def run_simulation(
         self,
-        address: str,
-        name: str,
-        success_rate: float,
-        volatility: float
-    ) -> SimulatedToken:
-        """Create a synthetic token with price evolution."""
-        # Create token info
-        token_info = TokenInfo(
-            address=address,
-            symbol=name[:4].upper(),
-            name=name,
-            chain="ethereum",
-            decimals=18,
-            total_supply=Decimal('1000000000'),
-            deployer="0x" + "0" * 40,
-            creation_time=self.current_time,
-            is_verified=random.random() > 0.5
-        )
-        
-        # Determine if rugpull
-        is_rugpull = random.random() > success_rate
-        rugpull_block = None
-        if is_rugpull:
-            # Rugpull happens 10-100 blocks after launch
-            rugpull_block = self.current_block + random.randint(10, 100)
-        
-        # Generate initial price (0.00001 - 0.01 ETH)
-        initial_price = Decimal(str(random.uniform(0.00001, 0.01)))
-        
-        # Create simulated token
-        token = SimulatedToken(
-            token_info=token_info,
-            price_history=[(self.current_time, initial_price)],
-            liquidity_history=[(self.current_time, Decimal('10'))],  # 10 ETH initial
-            volume_24h=Decimal('0'),
-            holder_count=1,
-            is_rugpull=is_rugpull,
-            rugpull_block=rugpull_block
-        )
-        
-        # Set volatility
-        token.token_info.metadata = {'volatility': volatility}
-        
-        return token
-    
-    async def run_simulation(self, duration_hours: int = 24) -> SimulationResult:
+        duration_hours: int = 24,
+        time_step_minutes: int = 5
+    ) -> SimulationResult:
         """
-        Run the simulation for specified duration.
+        Run complete simulation for specified duration.
         
         Args:
             duration_hours: Simulation duration in hours
+            time_step_minutes: Time step between updates
             
         Returns:
-            Simulation results
+            SimulationResult: Comprehensive simulation results
         """
         try:
-            self.logger.info(f"Starting {duration_hours} hour simulation...")
+            self.logger.info(f"Starting {duration_hours}h simulation...")
             self.is_running = True
             
             end_time = self.current_time + timedelta(hours=duration_hours)
+            step_delta = timedelta(minutes=time_step_minutes)
             
             while self.current_time < end_time and self.is_running:
-                # Advance time (1 block = ~12 seconds)
-                await self._advance_time()
-                
-                # Update market state
+                # Update market conditions
                 await self._update_market_state()
                 
-                # Generate new opportunities
+                # Generate trading opportunities
                 opportunities = await self._generate_opportunities()
                 
                 # Process opportunities through strategy
                 for opportunity in opportunities:
                     await self._process_opportunity(opportunity)
                 
-                # Update positions
-                await self._update_positions()
+                # Update positions and portfolio
+                await self._update_portfolio()
                 
-                # Record metrics
-                self._record_metrics()
+                # Advance time
+                self.current_time += step_delta
+                self.current_block += 50  # ~5 min blocks
                 
-                # Small delay to prevent tight loop
+                # Small delay for realistic simulation
                 await asyncio.sleep(0.01)
             
             # Calculate final results
             self._calculate_results()
             
-            self.logger.info("✅ Simulation completed")
+            self.logger.info("✅ Simulation completed successfully")
             return self.simulation_results
             
         except Exception as e:
-            self.logger.error(f"Simulation error: {e}")
+            self.logger.error(f"Simulation failed: {e}")
             raise
         finally:
             self.is_running = False
-    
-    async def _advance_time(self) -> None:
-        """Advance simulation time by one block."""
-        self.current_time += timedelta(seconds=12)
-        self.current_block += 1
-        
-        # Update gas price
-        base_gas = 30
-        congestion_multiplier = 1 + self.network_congestion
-        gas_price = int(base_gas * congestion_multiplier * random.uniform(0.8, 1.2))
-        self.gas_prices.append(gas_price)
-        
-        # Update network congestion
-        self.network_congestion = max(0, min(1, 
-            self.network_congestion + random.uniform(-0.1, 0.1)
-        ))
-    
-    async def _update_market_state(self) -> None:
-        """Update token prices and liquidity."""
-        for token in self.simulated_tokens.values():
-            # Check for rugpull
-            if token.is_rugpull and token.rugpull_block == self.current_block:
-                # Rugpull - price goes to ~0
-                new_price = Decimal('0.0000001')
-                new_liquidity = Decimal('0.1')
-                self.logger.warning(f"🚨 RUGPULL: {token.token_info.symbol}")
-            else:
-                # Normal price evolution
-                last_price = token.price_history[-1][1]
-                volatility = token.token_info.metadata.get('volatility', 0.3)
-                
-                # Random walk with drift
-                drift = 0.001 if not token.is_rugpull else -0.01
-                change = random.normalvariate(drift, volatility)
-                new_price = last_price * Decimal(str(1 + change))
-                new_price = max(Decimal('0.0000001'), new_price)
-                
-                # Update liquidity
-                last_liquidity = token.liquidity_history[-1][1]
-                liq_change = random.uniform(-0.05, 0.1)
-                new_liquidity = last_liquidity * Decimal(str(1 + liq_change))
+
+    async def _initialize_simulation_tokens(self) -> None:
+        """Initialize tokens for simulation."""
+        try:
+            # Create sample tokens with different characteristics
+            sample_tokens = [
+                ("PUMP", "PumpToken", True, False),   # Moonshot
+                ("RUG", "RugPull", False, True),      # Rugpull
+                ("STABLE", "StableGains", False, False),  # Stable performer
+                ("VOLATILE", "VolatileCoin", True, False),  # Volatile
+            ]
             
-            # Record updates
-            token.price_history.append((self.current_time, new_price))
-            token.liquidity_history.append((self.current_time, new_liquidity))
-            
-            # Update volume
-            token.volume_24h = new_liquidity * Decimal(str(random.uniform(0.1, 2)))
-            
-            # Update holders
-            if not token.is_rugpull:
-                token.holder_count += random.randint(0, 5)
-    
-    async def _generate_opportunities(self) -> List[TradingOpportunity]:
-        """Generate trading opportunities from market state."""
-        opportunities = []
-        
-        # Randomly select tokens that might present opportunities
-        for token in self.simulated_tokens.values():
-            if random.random() < 0.1:  # 10% chance per block
-                # Create opportunity
-                current_price = token.price_history[-1][1]
-                current_liquidity = token.liquidity_history[-1][1]
-                
-                opportunity = TradingOpportunity(
-                    token=token.token_info,
-                    liquidity=LiquidityInfo(
-                        pair_address=f"0x{hash(token.token_info.address):040x}",
-                        dex_name="Uniswap V2",
-                        liquidity_token=current_liquidity,
-                        liquidity_usd=float(current_liquidity * Decimal('2000')),
-                        initial_liquidity=float(token.liquidity_history[0][1]),
-                        current_liquidity=float(current_liquidity),
-                        liquidity_locked=random.random() > 0.5,
-                        lock_period=timedelta(days=random.randint(30, 365))
-                    ),
-                    detected_at=self.current_time,
-                    risk_level=self._assess_risk(token),
-                    initial_price=current_price,
-                    current_price=current_price
+            for symbol, name, is_moonshot, is_rugpull in sample_tokens:
+                token_info = TokenInfo(
+                    address=f"0x{''.join(random.choices('0123456789abcdef', k=40))}",
+                    symbol=symbol,
+                    name=name,
+                    decimals=18
                 )
                 
-                opportunities.append(opportunity)
-        
-        return opportunities
-    
-    def _assess_risk(self, token: SimulatedToken) -> RiskLevel:
-        """Assess risk level of token."""
-        if token.is_rugpull:
-            return RiskLevel.EXTREME
-        
-        volatility = token.token_info.metadata.get('volatility', 0.3)
-        if volatility > 0.7:
-            return RiskLevel.HIGH
-        elif volatility > 0.4:
-            return RiskLevel.MEDIUM
-        else:
-            return RiskLevel.LOW
-    
-    async def _process_opportunity(self, opportunity: TradingOpportunity) -> None:
-        """Process opportunity through strategy."""
-        try:
-            # Call strategy
-            should_trade = await self.strategy_callback(opportunity)
-            
-            if should_trade:
-                # Get risk assessment
-                risk_assessment = self.risk_manager.assess_opportunity(opportunity)
+                simulated_token = SimulatedToken(
+                    token_info=token_info,
+                    volume_24h=Decimal(str(random.uniform(10000, 100000))),
+                    holder_count=random.randint(100, 10000),
+                    is_rugpull=is_rugpull,
+                    rugpull_block=self.current_block + random.randint(100, 1000) if is_rugpull else None
+                )
                 
-                if risk_assessment.risk_assessment == "approved":
-                    # Simulate trade execution
-                    await self._execute_simulated_trade(
-                        opportunity, risk_assessment
-                    )
-        
+                # Initialize price history
+                base_price = Decimal(str(random.uniform(0.001, 1.0)))
+                simulated_token.price_history.append((self.current_time, base_price))
+                
+                # Initialize liquidity
+                base_liquidity = Decimal(str(random.uniform(50000, 500000)))
+                simulated_token.liquidity_history.append((self.current_time, base_liquidity))
+                
+                self.simulated_tokens[token_info.address] = simulated_token
+            
+            self.logger.info(f"Initialized {len(self.simulated_tokens)} simulation tokens")
+            
         except Exception as e:
-            self.logger.error(f"Strategy processing error: {e}")
-    
-    async def _execute_simulated_trade(
-        self,
-        opportunity: TradingOpportunity,
-        risk_assessment: PositionSizeResult
-    ) -> None:
-        """Simulate trade execution."""
-        # Check balance
-        position_size = risk_assessment.approved_amount
-        if position_size > self.balance:
-            return
-        
-        # Simulate execution delay
-        await asyncio.sleep(self.config.latency_ms / 1000)
-        
-        # Check for MEV attack
-        if random.random() < self.config.mev_attack_rate:
-            # Sandwiched - worse price
-            slippage = 0.1
-            self.simulation_results.mev_losses += position_size * Decimal(str(slippage))
-        else:
-            slippage = 0.02
-        
-        # Calculate execution
-        token_address = opportunity.token.address
-        execution_price = opportunity.current_price * Decimal(str(1 + slippage))
-        tokens_received = position_size / execution_price
-        
-        # Simulate gas costs
-        gas_price = self.gas_prices[-1] if self.gas_prices else 50
-        gas_cost = Decimal(str(gas_price * 200000 / 1e9))  # ~200k gas
-        
-        # Update balances
-        self.balance -= position_size + gas_cost
-        self.positions[token_address] = self.positions.get(
-            token_address, Decimal('0')
-        ) + tokens_received
-        
-        # Record trade
-        self.simulation_results.total_trades += 1
-        self.simulation_results.gas_costs += gas_cost
-        
-        # Create position in position manager
-        if self.position_manager:
-            await self.position_manager.open_position(
-                opportunity,
-                execution_price,
-                position_size
-            )
-    
-    async def _update_positions(self) -> None:
-        """Update position values and check exits."""
-        for token_address, amount in list(self.positions.items()):
-            if token_address not in self.simulated_tokens:
-                continue
+            self.logger.error(f"Failed to initialize simulation tokens: {e}")
+            raise
+
+    async def _initialize_market_conditions(self) -> None:
+        """Initialize market conditions for simulation."""
+        try:
+            # Initialize gas price history
+            base_gas_price = 25  # 25 gwei
+            for i in range(100):
+                # Simulate gas price fluctuations
+                gas_variation = random.uniform(0.5, 2.0)
+                gas_price = int(base_gas_price * gas_variation)
+                self.gas_prices.append(gas_price)
             
-            token = self.simulated_tokens[token_address]
-            current_price = token.price_history[-1][1]
+            # Initialize network congestion
+            self.network_congestion = random.uniform(0.3, 0.8)
             
-            # Check exit conditions (simplified)
-            if token.is_rugpull and token.rugpull_block <= self.current_block:
-                # Rugpulled - total loss
-                self.positions[token_address] = Decimal('0')
-                continue
+            self.logger.debug("Market conditions initialized")
             
-            # Random exit for simulation
-            if random.random() < 0.05:  # 5% chance to exit
-                # Sell position
-                value = amount * current_price
-                self.balance += value
-                del self.positions[token_address]
+        except Exception as e:
+            self.logger.error(f"Failed to initialize market conditions: {e}")
+            raise
+
+    async def _update_market_state(self) -> None:
+        """Update market state for current time step."""
+        try:
+            # Update token prices
+            for token_address, simulated_token in self.simulated_tokens.items():
+                await self._update_token_price(simulated_token)
+            
+            # Update gas prices
+            if len(self.gas_prices) > 1000:
+                self.gas_prices.pop(0)  # Keep last 1000 prices
+            
+            # Simulate gas price changes
+            last_gas = self.gas_prices[-1] if self.gas_prices else 25
+            gas_change = random.uniform(0.9, 1.1)
+            new_gas = max(10, int(last_gas * gas_change))
+            self.gas_prices.append(new_gas)
+            
+            # Update network congestion
+            congestion_change = random.uniform(-0.1, 0.1)
+            self.network_congestion = max(0.1, min(1.0, self.network_congestion + congestion_change))
+            
+        except Exception as e:
+            self.logger.error(f"Failed to update market state: {e}")
+
+    async def _update_token_price(self, simulated_token: SimulatedToken) -> None:
+        """Update price for a simulated token."""
+        try:
+            last_price = simulated_token.price_history[-1][1]
+            
+            # Check for rugpull
+            if (simulated_token.is_rugpull and 
+                simulated_token.rugpull_block and 
+                self.current_block >= simulated_token.rugpull_block):
+                # Rugpull: price drops to near zero
+                new_price = last_price * Decimal('0.01')
+            else:
+                # Normal price evolution
+                # Use different volatility based on token characteristics
+                if simulated_token.token_info.symbol == "PUMP":
+                    # High volatility, upward bias
+                    price_change = random.uniform(-0.1, 0.3)
+                elif simulated_token.token_info.symbol == "VOLATILE":
+                    # High volatility, no bias
+                    price_change = random.uniform(-0.2, 0.2)
+                elif simulated_token.token_info.symbol == "STABLE":
+                    # Low volatility, slight upward bias
+                    price_change = random.uniform(-0.02, 0.05)
+                else:
+                    # Default volatility
+                    price_change = random.uniform(-0.05, 0.05)
                 
-                # TODO: Update position manager
-    
-    def _record_metrics(self) -> None:
-        """Record performance metrics."""
-        # Calculate portfolio value
-        portfolio_value = self.balance
-        for token_address, amount in self.positions.items():
-            if token_address in self.simulated_tokens:
-                token = self.simulated_tokens[token_address]
-                current_price = token.price_history[-1][1]
-                portfolio_value += amount * current_price
-        
-        self.balance_history.append((self.current_time, portfolio_value))
+                new_price = last_price * Decimal(str(1 + price_change))
+                new_price = max(Decimal('0.000001'), new_price)  # Prevent negative prices
+            
+            simulated_token.price_history.append((self.current_time, new_price))
+            
+            # Keep only last 1000 price points
+            if len(simulated_token.price_history) > 1000:
+                simulated_token.price_history.pop(0)
+                
+        except Exception as e:
+            self.logger.error(f"Failed to update token price: {e}")
+
+    async def _generate_opportunities(self) -> List[TradingOpportunity]:
+        """Generate trading opportunities for current time step."""
+        try:
+            opportunities = []
+            
+            # Generate opportunities with varying probability
+            for token_address, simulated_token in self.simulated_tokens.items():
+                # Opportunity probability based on token characteristics
+                if simulated_token.token_info.symbol == "PUMP":
+                    opportunity_chance = 0.3  # 30% chance per step
+                elif simulated_token.token_info.symbol == "VOLATILE":
+                    opportunity_chance = 0.2  # 20% chance per step
+                else:
+                    opportunity_chance = 0.1  # 10% chance per step
+                
+                if random.random() < opportunity_chance:
+                    # Create trading opportunity
+                    current_price = simulated_token.price_history[-1][1]
+                    current_liquidity = simulated_token.liquidity_history[-1][1] if simulated_token.liquidity_history else Decimal('100000')
+                    
+                    liquidity_info = LiquidityInfo(
+                        liquidity_usd=float(current_liquidity),
+                        dex_name="SimulatedDEX",
+                        pair_address=f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+                    )
+                    
+                    # Update token price for opportunity
+                    simulated_token.token_info.price = current_price
+                    
+                    opportunity = TradingOpportunity(
+                        token=simulated_token.token_info,
+                        liquidity=liquidity_info,
+                        timestamp=self.current_time,
+                        chain="ethereum",
+                        metadata={
+                            'simulation': True,
+                            'block_number': self.current_block,
+                            'gas_price': self.gas_prices[-1] if self.gas_prices else 25
+                        }
+                    )
+                    
+                    opportunities.append(opportunity)
+            
+            return opportunities
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate opportunities: {e}")
+            return []
+
+    async def _process_opportunity(self, opportunity: TradingOpportunity) -> None:
+        """Process a trading opportunity through the strategy."""
+        try:
+            if not self.strategy_callback:
+                return
+            
+            # Call strategy to evaluate opportunity
+            decision = await self.strategy_callback(opportunity)
+            
+            if decision and hasattr(decision, 'action') and decision.action == 'BUY':
+                # Execute simulated trade
+                result = await self._execute_simulated_trade(opportunity, decision)
+                
+                if result and result.success:
+                    self.simulation_results.total_trades += 1
+                    if result.amount_out > result.amount_in:
+                        self.simulation_results.profitable_trades += 1
+                    
+                    # Update portfolio
+                    self.balance -= result.amount_in
+                    if opportunity.token.address in self.positions:
+                        self.positions[opportunity.token.address] += result.amount_out
+                    else:
+                        self.positions[opportunity.token.address] = result.amount_out
+                        
+        except Exception as e:
+            self.logger.error(f"Failed to process opportunity: {e}")
+
+    async def _execute_simulated_trade(
+        self, 
+        opportunity: TradingOpportunity, 
+        decision: Any
+    ) -> Optional[ExecutionResult]:
+        """Execute a simulated trade with realistic outcomes."""
+        try:
+            # Simulate execution time
+            execution_delay = self.config.latency_ms / 1000.0
+            await asyncio.sleep(execution_delay / 1000.0)  # Scale down for simulation
+            
+            # Check for execution failure
+            if random.random() < self.config.failure_rate:
+                return ExecutionResult(
+                    success=False,
+                    order_id=f"SIM_{self.simulation_results.total_trades}",
+                    tx_hash=None,
+                    amount_in=Decimal('0'),
+                    amount_out=Decimal('0'),
+                    actual_price=Decimal('0'),
+                    gas_used=None,
+                    gas_cost=Decimal('0'),
+                    execution_time=self.current_time,
+                    error_message="Simulated execution failure"
+                )
+            
+            # Calculate trade amounts
+            trade_amount = getattr(decision, 'amount', Decimal('1.0'))  # Default 1 ETH
+            current_price = opportunity.token.price
+            
+            # Apply slippage
+            slippage = random.uniform(0.001, 0.02)  # 0.1% to 2% slippage
+            if self.config.slippage_model == "linear":
+                actual_price = current_price * Decimal(str(1 - slippage))
+            else:
+                actual_price = current_price * Decimal(str(1 - slippage * 1.5))
+            
+            tokens_received = trade_amount / actual_price
+            
+            # Calculate gas cost
+            gas_used = random.randint(100000, 250000)
+            gas_price_gwei = self.gas_prices[-1] if self.gas_prices else 25
+            gas_cost = Decimal(str(gas_used * gas_price_gwei * 1e-9))  # Convert to ETH
+            
+            # Check for MEV attack
+            if random.random() < self.config.mev_attack_rate:
+                # MEV attack: reduce tokens received
+                tokens_received *= Decimal('0.9')  # 10% MEV loss
+                self.simulation_results.mev_losses += trade_amount * Decimal('0.1')
+            
+            self.simulation_results.gas_costs += gas_cost
+            
+            # Create successful execution result
+            return ExecutionResult(
+                success=True,
+                order_id=f"SIM_{self.simulation_results.total_trades}",
+                tx_hash=f"0x{''.join(random.choices('0123456789abcdef', k=64))}",
+                amount_in=trade_amount,
+                amount_out=tokens_received,
+                actual_price=actual_price,
+                gas_used=gas_used,
+                gas_cost=gas_cost,
+                execution_time=self.current_time
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to execute simulated trade: {e}")
+            return None
+
+    async def _update_portfolio(self) -> None:
+        """Update portfolio value and track performance."""
+        try:
+            # Calculate portfolio value
+            portfolio_value = self.balance
+            for token_address, amount in self.positions.items():
+                if token_address in self.simulated_tokens:
+                    token = self.simulated_tokens[token_address]
+                    current_price = token.price_history[-1][1]
+                    portfolio_value += amount * current_price
+            
+            self.balance_history.append((self.current_time, portfolio_value))
+            
+        except Exception as e:
+            self.logger.error(f"Failed to update portfolio: {e}")
     
     def _calculate_results(self) -> None:
         """Calculate final simulation results."""
-        if not self.balance_history:
-            return
-        
-        initial_balance = self.balance_history[0][1]
-        final_balance = self.balance_history[-1][1]
-        
-        # P&L
-        self.simulation_results.total_pnl = final_balance - initial_balance
-        
-        # Win rate
-        # TODO: Track individual trade outcomes
-        
-        # Max drawdown
-        peak = initial_balance
-        max_dd = 0
-        for _, balance in self.balance_history:
-            if balance > peak:
-                peak = balance
-            drawdown = float((peak - balance) / peak)
-            max_dd = max(max_dd, drawdown)
-        
-        self.simulation_results.max_drawdown = max_dd
-        
-        # Average return
-        if self.simulation_results.total_trades > 0:
-            self.simulation_results.average_return = float(
-                self.simulation_results.total_pnl / 
-                initial_balance / 
-                self.simulation_results.total_trades
-            )
+        try:
+            if not self.balance_history:
+                return
+            
+            initial_balance = self.balance_history[0][1]
+            final_balance = self.balance_history[-1][1]
+            
+            # P&L
+            self.simulation_results.total_pnl = final_balance - initial_balance
+            
+            # Win rate
+            if self.simulation_results.total_trades > 0:
+                self.simulation_results.win_rate = (
+                    self.simulation_results.profitable_trades / 
+                    self.simulation_results.total_trades
+                )
+            
+            # Max drawdown
+            peak = initial_balance
+            max_dd = 0
+            for _, balance in self.balance_history:
+                if balance > peak:
+                    peak = balance
+                drawdown = float((peak - balance) / peak)
+                max_dd = max(max_dd, drawdown)
+            
+            self.simulation_results.max_drawdown = max_dd
+            
+            # Average return
+            if self.simulation_results.total_trades > 0:
+                self.simulation_results.average_return = float(
+                    self.simulation_results.total_pnl / 
+                    initial_balance / 
+                    self.simulation_results.total_trades
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Failed to calculate results: {e}")
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """
@@ -549,27 +574,39 @@ class SimulationEnvironment:
         Returns:
             Dictionary of performance metrics
         """
-        return {
-            'total_trades': self.simulation_results.total_trades,
-            'total_pnl': float(self.simulation_results.total_pnl),
-            'pnl_percentage': float(
-                self.simulation_results.total_pnl / 
-                Decimal(str(self.config.initial_balance)) * 100
-            ),
-            'max_drawdown': self.simulation_results.max_drawdown * 100,
-            'gas_costs': float(self.simulation_results.gas_costs),
-            'mev_losses': float(self.simulation_results.mev_losses),
-            'final_balance': float(self.balance_history[-1][1] if self.balance_history else 0),
-            'simulation_blocks': self.current_block - 15000000
-        }
+        try:
+            return {
+                'total_trades': self.simulation_results.total_trades,
+                'profitable_trades': self.simulation_results.profitable_trades,
+                'win_rate': round(self.simulation_results.win_rate * 100, 2),
+                'total_pnl': float(self.simulation_results.total_pnl),
+                'pnl_percentage': float(
+                    self.simulation_results.total_pnl / 
+                    Decimal(str(self.config.initial_balance)) * 100
+                ),
+                'max_drawdown': round(self.simulation_results.max_drawdown * 100, 2),
+                'average_return': round(self.simulation_results.average_return * 100, 2),
+                'gas_costs': float(self.simulation_results.gas_costs),
+                'mev_losses': float(self.simulation_results.mev_losses),
+                'final_balance': float(self.balance_history[-1][1] if self.balance_history else 0),
+                'simulation_duration_hours': len(self.balance_history) * 5 / 60,  # Assuming 5-min steps
+                'simulation_blocks': self.current_block - 15000000
+            }
+        except Exception as e:
+            self.logger.error(f"Failed to get performance metrics: {e}")
+            return {}
     
     async def shutdown(self) -> None:
         """Shutdown simulation environment."""
-        self.logger.info("Shutting down Simulation Environment...")
-        self.is_running = False
-        
-        # Generate final report
-        metrics = self.get_performance_metrics()
-        self.logger.info(f"Final metrics: {json.dumps(metrics, indent=2)}")
-        
-        self.logger.info("Simulation Environment shutdown complete")
+        try:
+            self.logger.info("Shutting down Simulation Environment...")
+            self.is_running = False
+            
+            # Generate final report
+            metrics = self.get_performance_metrics()
+            self.logger.info(f"Final simulation metrics: {json.dumps(metrics, indent=2)}")
+            
+            self.logger.info("✅ Simulation Environment shutdown complete")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to shutdown simulation environment: {e}")

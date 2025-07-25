@@ -14,6 +14,7 @@ from enum import Enum
 import asyncio
 import json
 import uuid
+from datetime import datetime, timedelta
 
 from models.token import TradingOpportunity
 from utils.logger import logger_manager
@@ -599,3 +600,299 @@ class PositionManager:
             
         except Exception as e:
             self.logger.error(f"Error during position manager cleanup: {e}")
+
+
+    #!/usr/bin/env python3
+    """
+    Enhanced position management system for tracking active trades and portfolio state.
+
+    This file adds the missing get_portfolio_summary method to fix the dashboard error.
+
+    File: trading/position_manager.py 
+    Class: PositionManager
+    Method: get_portfolio_summary (ADD THIS METHOD TO THE EXISTING CLASS)
+    """
+
+    # ADD THIS METHOD TO THE EXISTING PositionManager CLASS
+
+    def get_portfolio_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive portfolio summary for dashboard and reporting.
+        
+        This method provides all the portfolio metrics needed by the dashboard
+        and other system components for monitoring and display.
+        
+        Returns:
+            Dictionary containing comprehensive portfolio metrics and statistics
+        """
+        try:
+            # Basic position counts
+            total_positions = len(self.active_positions)
+            total_closed_positions = len(self.closed_positions)
+            total_exposure_usd = self.get_total_exposure_usd()
+            daily_pnl = self.get_daily_pnl()
+            
+            # Calculate P&L metrics
+            total_unrealized_pnl = 0.0
+            total_position_value = 0.0
+            
+            for position in self.active_positions.values():
+                total_unrealized_pnl += float(position.unrealized_pnl)
+                position_value = float(position.entry_amount) * float(position.current_price)
+                total_position_value += position_value
+            
+            total_realized_pnl = float(self.total_pnl)
+            total_portfolio_pnl = total_realized_pnl + total_unrealized_pnl
+            
+            # Calculate performance metrics
+            win_rate_percentage = 0.0
+            if total_closed_positions > 0:
+                win_rate_percentage = (self.successful_trades / total_closed_positions) * 100
+            
+            # Calculate average position size
+            avg_position_size = 0.0
+            if total_positions > 0:
+                avg_position_size = total_exposure_usd / total_positions
+            
+            # Position breakdown by status
+            position_breakdown = {}
+            for position in self.active_positions.values():
+                status = position.status.value
+                position_breakdown[status] = position_breakdown.get(status, 0) + 1
+            
+            # Get top and worst performers
+            active_positions_list = list(self.active_positions.values())
+            if active_positions_list:
+                # Sort by unrealized P&L
+                active_positions_list.sort(key=lambda p: float(p.unrealized_pnl), reverse=True)
+                
+                # Top performers (profitable positions)
+                top_performers = []
+                for position in active_positions_list[:3]:
+                    if float(position.unrealized_pnl) > 0:
+                        top_performers.append({
+                            'symbol': position.token_symbol,
+                            'pnl': round(float(position.unrealized_pnl), 2),
+                            'pnl_percentage': round(position.unrealized_pnl_percentage, 2),
+                            'entry_price': float(position.entry_price),
+                            'current_price': float(position.current_price)
+                        })
+                
+                # Worst performers (losing positions)
+                worst_performers = []
+                for position in reversed(active_positions_list[-3:]):
+                    if float(position.unrealized_pnl) < 0:
+                        worst_performers.append({
+                            'symbol': position.token_symbol,
+                            'pnl': round(float(position.unrealized_pnl), 2),
+                            'pnl_percentage': round(position.unrealized_pnl_percentage, 2),
+                            'entry_price': float(position.entry_price),
+                            'current_price': float(position.current_price)
+                        })
+            else:
+                top_performers = []
+                worst_performers = []
+            
+            # Risk metrics
+            largest_position_exposure = 0.0
+            largest_position_symbol = None
+            
+            if total_positions > 0:
+                largest_position = max(
+                    self.active_positions.values(),
+                    key=lambda p: float(p.entry_amount) * float(p.current_price)
+                )
+                largest_position_exposure = float(largest_position.entry_amount) * float(largest_position.current_price)
+                largest_position_symbol = largest_position.token_symbol
+            
+            # Risk concentration percentage
+            risk_concentration = 0.0
+            if total_exposure_usd > 0:
+                risk_concentration = (largest_position_exposure / total_exposure_usd) * 100
+            
+            # Chain breakdown
+            chain_breakdown = {}
+            for position in self.active_positions.values():
+                chain = position.chain
+                if chain not in chain_breakdown:
+                    chain_breakdown[chain] = {
+                        'positions': 0,
+                        'exposure': 0.0,
+                        'pnl': 0.0
+                    }
+                
+                chain_breakdown[chain]['positions'] += 1
+                chain_breakdown[chain]['exposure'] += float(position.entry_amount) * float(position.current_price)
+                chain_breakdown[chain]['pnl'] += float(position.unrealized_pnl)
+            
+            # Calculate total fees from closed positions
+            total_fees = 0.0
+            for position in self.closed_positions.values():
+                total_fees += float(position.gas_fees_paid)
+            
+            # Calculate net P&L (after fees)
+            net_pnl = total_portfolio_pnl - total_fees
+            
+            # Position age analysis
+            avg_hold_time_hours = 0.0
+            if self.active_positions:
+                total_hold_time = timedelta()
+                for position in self.active_positions.values():
+                    hold_time = datetime.now() - position.entry_time
+                    total_hold_time += hold_time
+                
+                avg_hold_time = total_hold_time / len(self.active_positions)
+                avg_hold_time_hours = avg_hold_time.total_seconds() / 3600
+            
+            return {
+                # Basic metrics
+                'total_positions': total_positions,
+                'total_closed_positions': total_closed_positions,
+                'total_exposure_usd': round(total_exposure_usd, 2),
+                'average_position_size': round(avg_position_size, 2),
+                'total_position_value': round(total_position_value, 2),
+                
+                # P&L metrics
+                'total_pnl': round(total_portfolio_pnl, 2),
+                'realized_pnl': round(total_realized_pnl, 2),
+                'unrealized_pnl': round(total_unrealized_pnl, 2),
+                'daily_pnl': round(daily_pnl, 2),
+                'net_pnl': round(net_pnl, 2),
+                'total_fees': round(total_fees, 2),
+                
+                # Performance metrics
+                'win_rate_percentage': round(win_rate_percentage, 1),
+                'successful_trades': self.successful_trades,
+                'total_trades': total_closed_positions,
+                'avg_hold_time_hours': round(avg_hold_time_hours, 1),
+                
+                # Position analysis
+                'position_breakdown': position_breakdown,
+                'chain_breakdown': chain_breakdown,
+                'top_performers': top_performers,
+                'worst_performers': worst_performers,
+                
+                # Risk metrics
+                'largest_position_exposure': round(largest_position_exposure, 2),
+                'largest_position_symbol': largest_position_symbol,
+                'risk_concentration_percentage': round(risk_concentration, 1),
+                
+                # System status
+                'monitoring_active': self.monitoring_active,
+                'last_updated': datetime.now().isoformat(),
+                'status': 'active' if self.monitoring_active else 'inactive',
+                
+                # Additional metadata
+                'portfolio_health': 'healthy' if risk_concentration < 50 else 'concentrated',
+                'position_diversity': len(chain_breakdown),
+                'performance_trend': 'positive' if total_unrealized_pnl > 0 else 'negative'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error generating portfolio summary: {e}")
+            
+            # Return safe fallback data
+            return {
+                'total_positions': 0,
+                'total_closed_positions': 0,
+                'total_exposure_usd': 0.0,
+                'total_pnl': 0.0,
+                'realized_pnl': 0.0,
+                'unrealized_pnl': 0.0,
+                'daily_pnl': 0.0,
+                'win_rate_percentage': 0.0,
+                'successful_trades': 0,
+                'total_trades': 0,
+                'status': 'error',
+                'error_message': str(e),
+                'last_updated': datetime.now().isoformat(),
+                'monitoring_active': False,
+                'position_breakdown': {},
+                'chain_breakdown': {},
+                'top_performers': [],
+                'worst_performers': []
+            }
+
+    # ALSO ADD THIS HELPER METHOD TO THE PositionManager CLASS
+
+    def get_position_details(self) -> List[Dict[str, Any]]:
+        """
+        Get detailed information about all active positions for dashboard display.
+        
+        Returns:
+            List of position dictionaries with comprehensive details
+        """
+        try:
+            position_details = []
+            
+            for position in self.active_positions.values():
+                # Calculate additional metrics
+                hold_time = datetime.now() - position.entry_time
+                hold_time_hours = hold_time.total_seconds() / 3600
+                
+                # Position health assessment
+                health_status = 'healthy'
+                if position.unrealized_pnl_percentage < -20:
+                    health_status = 'critical'
+                elif position.unrealized_pnl_percentage < -10:
+                    health_status = 'warning'
+                elif position.unrealized_pnl_percentage > 20:
+                    health_status = 'excellent'
+                
+                # Risk level based on position size and P&L
+                position_value = float(position.entry_amount) * float(position.current_price)
+                risk_level = 'low'
+                if position_value > 100:  # $100+
+                    risk_level = 'high'
+                elif position_value > 50:  # $50+
+                    risk_level = 'medium'
+                
+                position_details.append({
+                    'id': position.id,
+                    'token_symbol': position.token_symbol,
+                    'token_address': position.token_address,
+                    'chain': position.chain,
+                    'status': position.status.value,
+                    
+                    # Entry details
+                    'entry_amount': float(position.entry_amount),
+                    'entry_price': float(position.entry_price),
+                    'entry_time': position.entry_time.isoformat(),
+                    'entry_tx_hash': position.entry_tx_hash,
+                    
+                    # Current state
+                    'current_price': float(position.current_price),
+                    'position_value': round(position_value, 2),
+                    'last_update': position.last_update.isoformat(),
+                    
+                    # P&L metrics
+                    'unrealized_pnl': round(float(position.unrealized_pnl), 2),
+                    'unrealized_pnl_percentage': round(position.unrealized_pnl_percentage, 2),
+                    
+                    # Price tracking
+                    'highest_price': float(position.highest_price) if position.highest_price else None,
+                    'lowest_price': float(position.lowest_price) if position.lowest_price else None,
+                    
+                    # Risk management
+                    'stop_loss_price': float(position.stop_loss_price) if position.stop_loss_price else None,
+                    'take_profit_price': float(position.take_profit_price) if position.take_profit_price else None,
+                    
+                    # Analytics
+                    'hold_time_hours': round(hold_time_hours, 1),
+                    'health_status': health_status,
+                    'risk_level': risk_level,
+                    'gas_fees_paid': float(position.gas_fees_paid),
+                    
+                    # Metadata
+                    'metadata': position.metadata
+                })
+            
+            # Sort by unrealized P&L (best performers first)
+            position_details.sort(key=lambda p: p['unrealized_pnl'], reverse=True)
+            
+            return position_details
+            
+        except Exception as e:
+            self.logger.error(f"Error getting position details: {e}")
+            return []
+
