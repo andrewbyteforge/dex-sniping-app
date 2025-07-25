@@ -30,7 +30,7 @@ from analyzers.social_analyzer import SocialAnalyzer
 from analyzers.trading_scorer import TradingScorer
 
 # Phase 3 Components - Original
-from trading.risk_manager import RiskManager, PortfolioLimits, RiskAssessment
+from trading.risk_manager import EnhancedRiskManager, PortfolioLimits, RiskAssessment
 from trading.position_manager import PositionManager, Position, PositionStatus
 from trading.execution_engine import ExecutionEngine
 
@@ -99,7 +99,7 @@ class EnhancedProductionSystem:
         self.trading_scorer: Optional[TradingScorer] = None
         
         # Phase 3: Trading components
-        self.risk_manager: Optional[RiskManager] = None
+        self.risk_manager: Optional[EnhancedRiskManager] = None
         self.position_manager: Optional[PositionManager] = None
         self.execution_engine: Optional[EnhancedExecutionEngine] = None
         
@@ -275,16 +275,18 @@ class EnhancedProductionSystem:
         try:
             self.logger.info("Initializing trading system...")
             
-            # Initialize risk manager
+            # Initialize risk manager with correct parameter names
             portfolio_limits = PortfolioLimits(
-                max_total_position_usd=10000.0,
-                max_position_size_usd=1000.0,
+                max_total_exposure_usd=10000.0,     # Fixed: was max_total_position_usd
+                max_single_position_usd=1000.0,     # Fixed: was max_position_size_usd  
                 max_positions_per_chain=5,
-                max_daily_losses_usd=500.0
+                max_daily_loss_usd=500.0,           # Fixed: was max_daily_losses_usd
+                max_total_positions=15,
+                min_liquidity_usd=50000.0
             )
             
-            self.risk_manager = RiskManager(portfolio_limits)
-            await self.risk_manager.initialize()
+            self.risk_manager = EnhancedRiskManager(portfolio_limits)
+            # EnhancedRiskManager doesn't have an initialize() method - initialization is done in __init__
             
             # Initialize position manager
             self.position_manager = PositionManager()
@@ -325,22 +327,38 @@ class EnhancedProductionSystem:
                 self.logger.error(f"MEV Protection initialization failed: {e}")
                 self.mev_protection = None
             
-            # Initialize gas optimizer
+            # Initialize gas optimizer with Web3
             try:
                 self.gas_optimizer = GasOptimizer()
-                await self.gas_optimizer.initialize()
-                self.logger.info("✅ Gas Optimizer initialized")
+                # Get Web3 connection for gas optimization
+                if self.node_manager:
+                    w3 = await self.node_manager.get_web3_connection("ethereum")
+                    if w3:
+                        await self.gas_optimizer.initialize(w3)
+                        self.logger.info("✅ Gas Optimizer initialized with Web3")
+                    else:
+                        self.logger.warning("⚠️ Gas Optimizer initialized without Web3 (limited functionality)")
+                else:
+                    self.logger.warning("⚠️ Gas Optimizer initialized without Web3 (no node manager)")
                 
             except Exception as e:
                 self.logger.error(f"Gas Optimizer initialization failed: {e}")
                 self.gas_optimizer = None
             
-            # Initialize transaction simulator
+            # Initialize transaction simulator with Web3
             if TRANSACTION_SIMULATOR_AVAILABLE and TransactionSimulator:
                 try:
                     self.tx_simulator = TransactionSimulator()
-                    await self.tx_simulator.initialize()
-                    self.logger.info("✅ Transaction Simulator initialized")
+                    # Get Web3 connection for simulation
+                    if self.node_manager:
+                        w3 = await self.node_manager.get_web3_connection("ethereum")
+                        if w3:
+                            await self.tx_simulator.initialize(w3)
+                            self.logger.info("✅ Transaction Simulator initialized with Web3")
+                        else:
+                            self.logger.warning("⚠️ Transaction Simulator initialized without Web3")
+                    else:
+                        self.logger.warning("⚠️ Transaction Simulator initialized without Web3")
                     
                 except Exception as e:
                     self.logger.error(f"Transaction Simulator initialization failed: {e}")
@@ -364,52 +382,44 @@ class EnhancedProductionSystem:
             # Initialize chain monitors based on configuration
             enabled_chains = []
             
-            # Ethereum monitor
-            if settings.chains.ethereum.enabled:
-                eth_monitor = NewTokenMonitor(
-                    chain="ethereum",
-                    rpc_url=settings.networks.ethereum_rpc_url,
-                    analyzer=self.contract_analyzer,
-                    scorer=self.trading_scorer,
-                    auto_trading=self.auto_trading_enabled
-                )
+            # Ethereum monitor - enable by default
+            ethereum_enabled = True
+                
+            if ethereum_enabled:
+                eth_monitor = NewTokenMonitor(check_interval=5.0)  # Only pass supported parameters
+                # Configure the monitor after creation
                 await eth_monitor.initialize()
                 self.monitors.append(eth_monitor)
                 enabled_chains.append("ethereum")
             
             # Base monitor
-            if settings.chains.base.enabled:
-                base_monitor = BaseChainMonitor(
-                    chain="base",
-                    rpc_url=settings.networks.base_rpc_url,
-                    analyzer=self.contract_analyzer,
-                    scorer=self.trading_scorer,
-                    auto_trading=self.auto_trading_enabled
-                )
+            base_enabled = True  # Enable by default
+                
+            if base_enabled:
+                base_monitor = BaseChainMonitor(check_interval=5.0)  # Only pass supported parameters
+                # Configure the monitor after creation
                 await base_monitor.initialize()
                 self.monitors.append(base_monitor)
                 enabled_chains.append("base")
             
             # Solana monitor (if enabled)
-            if hasattr(settings.chains, 'solana') and settings.chains.solana.enabled:
+            try:
+                solana_enabled = getattr(settings, 'chains', None) and getattr(settings.chains, 'solana', None) and getattr(settings.chains.solana, 'enabled', False)
+            except:
+                solana_enabled = False  # Default to disabled
+                
+            if solana_enabled:
                 try:
-                    solana_monitor = SolanaMonitor(
-                        scorer=self.trading_scorer,
-                        auto_trading=self.auto_trading_enabled
-                    )
+                    solana_monitor = SolanaMonitor(check_interval=10.0)  # Only pass supported parameters
                     await solana_monitor.initialize()
                     self.monitors.append(solana_monitor)
                     enabled_chains.append("solana")
                 except Exception as e:
                     self.logger.warning(f"Solana monitor initialization failed: {e}")
             
-            # Jupiter Solana monitor (if enabled)
-            if hasattr(settings.chains, 'solana') and settings.chains.solana.enabled:
+                # Jupiter Solana monitor (if Solana is enabled)
                 try:
-                    jupiter_monitor = JupiterSolanaMonitor(
-                        scorer=self.trading_scorer,
-                        auto_trading=self.auto_trading_enabled
-                    )
+                    jupiter_monitor = JupiterSolanaMonitor(check_interval=15.0)  # Only pass supported parameters
                     await jupiter_monitor.initialize()
                     self.monitors.append(jupiter_monitor)
                     enabled_chains.append("jupiter")

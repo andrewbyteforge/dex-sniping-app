@@ -137,7 +137,7 @@ class GasOptimizer:
             asyncio.create_task(self._start_network_monitoring())
             
             # Initialize gas price tracking
-            await self._update_gas_estimates()
+            asyncio.create_task(self._update_gas_estimates())
             
             self.initialized = True
             self.logger.info("✅ Gas optimizer initialized")
@@ -202,7 +202,7 @@ class GasOptimizer:
         """Get current gas price estimates from multiple sources."""
         try:
             # Get base fee from latest block
-            latest_block = await self.web3.eth.get_block("latest")
+            latest_block = self.web3.eth.get_block("latest")
             base_fee_wei = latest_block.get("baseFeePerGas", 20_000_000_000)
             base_fee_gwei = int(base_fee_wei / 1_000_000_000)
             
@@ -402,7 +402,7 @@ class GasOptimizer:
         """Optimize gas limit for transaction."""
         try:
             # Estimate gas usage
-            estimated_gas = await self.web3.eth.estimate_gas(tx_params)
+            estimated_gas = self.web3.eth.estimate_gas(tx_params)
             
             # Add buffer (10-20% depending on complexity)
             buffer_percent = 0.15  # 15% buffer
@@ -539,7 +539,7 @@ class GasOptimizer:
             while self.initialized:
                 try:
                     await self._update_network_stats()
-                    await self._update_gas_estimates()
+                    asyncio.create_task(self._update_gas_estimates())
                     await asyncio.sleep(30)  # Update every 30 seconds
                     
                 except Exception as e:
@@ -553,14 +553,14 @@ class GasOptimizer:
         """Update network condition statistics."""
         try:
             # Get latest block info
-            latest_block = await self.web3.eth.get_block("latest")
+            latest_block = self.web3.eth.get_block("latest")
             
             # Update base fee
             base_fee_wei = latest_block.get("baseFeePerGas", 0)
             self.network_stats["current_base_fee"] = base_fee_wei // 1_000_000_000
             
             # Get pending transaction count
-            pending_count = await self.web3.eth.get_block_transaction_count("pending")
+            pending_count = self.web3.eth.get_block_transaction_count("pending")
             self.network_stats["pending_transactions"] = pending_count
             
             # Estimate congestion level
