@@ -374,64 +374,231 @@ class EnhancedProductionSystem:
             self.logger.error(f"Failed to initialize speed optimizations: {e}")
             # Don't raise - continue with basic functionality
 
+
+
     async def _initialize_monitors(self) -> None:
-        """Initialize monitoring components."""
+        """
+        Initialize monitoring components with proper error handling.
+        
+        This method fixes the AttributeError by calling the correct initialize() methods
+        and handling constructor parameters properly.
+        """
         try:
             self.logger.info("Initializing monitors...")
             
             # Initialize chain monitors based on configuration
             enabled_chains = []
             
-            # Ethereum monitor - enable by default
-            ethereum_enabled = True
-                
-            if ethereum_enabled:
-                eth_monitor = NewTokenMonitor(check_interval=5.0)  # Only pass supported parameters
-                # Configure the monitor after creation
-                await eth_monitor.initialize()
-                self.monitors.append(eth_monitor)
-                enabled_chains.append("ethereum")
-            
-            # Base monitor
-            base_enabled = True  # Enable by default
-                
-            if base_enabled:
-                base_monitor = BaseChainMonitor(check_interval=5.0)  # Only pass supported parameters
-                # Configure the monitor after creation
-                await base_monitor.initialize()
-                self.monitors.append(base_monitor)
-                enabled_chains.append("base")
-            
-            # Solana monitor (if enabled)
+            # Ethereum monitor - NEW TOKEN MONITOR
             try:
-                solana_enabled = getattr(settings, 'chains', None) and getattr(settings.chains, 'solana', None) and getattr(settings.chains.solana, 'enabled', False)
-            except:
-                solana_enabled = False  # Default to disabled
+                self.logger.info("Initializing Ethereum NewTokenMonitor...")
                 
-            if solana_enabled:
-                try:
-                    solana_monitor = SolanaMonitor(check_interval=10.0)  # Only pass supported parameters
-                    await solana_monitor.initialize()
-                    self.monitors.append(solana_monitor)
-                    enabled_chains.append("solana")
-                except Exception as e:
-                    self.logger.warning(f"Solana monitor initialization failed: {e}")
+                # Create with supported parameters only
+                eth_monitor = NewTokenMonitor(
+                    check_interval=5.0,
+                    chain="ethereum",
+                    rpc_url=getattr(settings.networks, 'ethereum_rpc_url', None),
+                    analyzer=getattr(self, 'contract_analyzer', None),
+                    scorer=getattr(self, 'trading_scorer', None),
+                    auto_trading=self.auto_trading_enabled
+                )
+                
+                # Call the PUBLIC initialize method
+                if await eth_monitor.initialize():
+                    self.monitors.append(eth_monitor)
+                    enabled_chains.append("ethereum")
+                    self.logger.info("✅ Ethereum NewTokenMonitor initialized")
+                else:
+                    self.logger.error("❌ Ethereum NewTokenMonitor failed to initialize")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ Ethereum monitor initialization failed: {e}")
             
-                # Jupiter Solana monitor (if Solana is enabled)
+            # Base monitor - BASE CHAIN MONITOR
+            try:
+                self.logger.info("Initializing Base Chain Monitor...")
+                
+                # Create with supported parameters only
+                base_monitor = BaseChainMonitor(
+                    check_interval=3.0,  # Faster blocks on Base
+                    chain="base",
+                    rpc_url=getattr(settings.networks, 'base_rpc_url', None),
+                    analyzer=getattr(self, 'contract_analyzer', None),
+                    scorer=getattr(self, 'trading_scorer', None),
+                    auto_trading=self.auto_trading_enabled
+                )
+                
+                # Call the PUBLIC initialize method
+                if await base_monitor.initialize():
+                    self.monitors.append(base_monitor)
+                    enabled_chains.append("base")
+                    self.logger.info("✅ Base Chain Monitor initialized")
+                else:
+                    self.logger.error("❌ Base Chain Monitor failed to initialize")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ Base monitor initialization failed: {e}")
+            
+            # Solana monitor - SOLANA MONITOR
+            try:
+                # Check if Solana is enabled (with fallback)
+                solana_enabled = True  # Default to enabled for testing
                 try:
-                    jupiter_monitor = JupiterSolanaMonitor(check_interval=15.0)  # Only pass supported parameters
-                    await jupiter_monitor.initialize()
-                    self.monitors.append(jupiter_monitor)
-                    enabled_chains.append("jupiter")
-                except Exception as e:
-                    self.logger.warning(f"Jupiter monitor initialization failed: {e}")
+                    if hasattr(settings, 'chains') and hasattr(settings.chains, 'solana'):
+                        solana_enabled = getattr(settings.chains.solana, 'enabled', True)
+                except Exception:
+                    pass  # Use default
+                    
+                if solana_enabled:
+                    self.logger.info("Initializing Solana Monitor...")
+                    
+                    # Create with supported parameters only
+                    solana_monitor = SolanaMonitor(
+                        check_interval=10.0,  # Slower to avoid rate limits
+                        scorer=getattr(self, 'trading_scorer', None),
+                        auto_trading=self.auto_trading_enabled
+                    )
+                    
+                    # Call the PUBLIC initialize method
+                    if await solana_monitor.initialize():
+                        self.monitors.append(solana_monitor)
+                        enabled_chains.append("solana")
+                        self.logger.info("✅ Solana Monitor initialized")
+                    else:
+                        self.logger.warning("⚠️ Solana Monitor failed to initialize")
+                else:
+                    self.logger.info("⏭️ Solana monitoring disabled in settings")
+                    
+            except Exception as e:
+                self.logger.warning(f"⚠️ Solana monitor initialization failed: {e}")
+            
+            # Jupiter Solana monitor - JUPITER SOLANA MONITOR
+            try:
+                # Only initialize Jupiter if Solana is enabled
+                solana_enabled = True  # Default to enabled for testing
+                try:
+                    if hasattr(settings, 'chains') and hasattr(settings.chains, 'solana'):
+                        solana_enabled = getattr(settings.chains.solana, 'enabled', True)
+                except Exception:
+                    pass  # Use default
+                    
+                if solana_enabled:
+                    self.logger.info("Initializing Jupiter Solana Monitor...")
+                    
+                    # Create with NO parameters (constructor takes none)
+                    jupiter_monitor = JupiterSolanaMonitor()
+                    
+                    # Call the PUBLIC initialize method
+                    if await jupiter_monitor.initialize():
+                        self.monitors.append(jupiter_monitor)
+                        enabled_chains.append("jupiter")
+                        self.logger.info("✅ Jupiter Solana Monitor initialized")
+                    else:
+                        self.logger.warning("⚠️ Jupiter Solana Monitor failed to initialize")
+                else:
+                    self.logger.info("⏭️ Jupiter monitoring disabled (Solana disabled)")
+                    
+            except Exception as e:
+                self.logger.warning(f"⚠️ Jupiter monitor initialization failed: {e}")
+            
+            # Summary and validation
+            if not self.monitors:
+                raise RuntimeError("❌ No monitors were successfully initialized")
             
             self.components_initialized["monitors"] = True
-            self.logger.info(f"✅ Monitors initialized for chains: {enabled_chains}")
+            self.logger.info("=" * 50)
+            self.logger.info(f"✅ MONITORS INITIALIZED: {len(self.monitors)} total")
+            self.logger.info(f"   Enabled chains: {enabled_chains}")
+            self.logger.info("=" * 50)
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize monitors: {e}")
+            self.logger.error(f"❌ CRITICAL: Failed to initialize monitors: {e}")
+            self.logger.error("   This will prevent the system from detecting opportunities")
             raise
+
+
+    # ADDITIONAL HELPER METHODS TO ADD TO THE EnhancedProductionSystem CLASS
+
+    def _get_monitor_by_name(self, monitor_name: str) -> Optional[Any]:
+        """
+        Get a monitor instance by name.
+        
+        Args:
+            monitor_name: Name of the monitor to find
+            
+        Returns:
+            Monitor instance or None if not found
+        """
+        for monitor in self.monitors:
+            if hasattr(monitor, 'name') and monitor.name.lower() == monitor_name.lower():
+                return monitor
+        return None
+
+    def get_monitor_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics from all active monitors.
+        
+        Returns:
+            Dictionary with stats from each monitor
+        """
+        stats = {}
+        
+        for monitor in self.monitors:
+            try:
+                if hasattr(monitor, 'get_stats'):
+                    monitor_stats = monitor.get_stats()
+                    monitor_name = getattr(monitor, 'name', 'unknown')
+                    stats[monitor_name] = monitor_stats
+            except Exception as e:
+                self.logger.error(f"Error getting stats from monitor: {e}")
+                
+        return stats
+
+    def reset_all_monitor_stats(self) -> None:
+        """Reset statistics for all monitors."""
+        for monitor in self.monitors:
+            try:
+                if hasattr(monitor, 'reset_stats'):
+                    monitor.reset_stats()
+            except Exception as e:
+                self.logger.error(f"Error resetting monitor stats: {e}")
+        
+        self.logger.info("All monitor statistics reset")
+
+    async def restart_failed_monitors(self) -> int:
+        """
+        Restart any monitors that have failed.
+        
+        Returns:
+            Number of monitors restarted
+        """
+        restarted_count = 0
+        
+        for i, monitor in enumerate(self.monitors):
+            try:
+                # Check if monitor is still running
+                if hasattr(monitor, 'is_running') and not monitor.is_running:
+                    self.logger.warning(f"Restarting failed monitor: {monitor.name}")
+                    
+                    # Try to reinitialize
+                    if hasattr(monitor, 'initialize'):
+                        if await monitor.initialize():
+                            self.logger.info(f"✅ Monitor {monitor.name} restarted successfully")
+                            restarted_count += 1
+                        else:
+                            self.logger.error(f"❌ Failed to restart monitor {monitor.name}")
+                            
+            except Exception as e:
+                self.logger.error(f"Error checking/restarting monitor: {e}")
+        
+        return restarted_count
+
+
+
+
+
+
+
 
     async def _initialize_web_dashboard(self) -> None:
         """Initialize web dashboard if enabled."""
