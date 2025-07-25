@@ -250,26 +250,10 @@ class DEXManager:
             if not router_address:
                 raise ValueError(f"Router {router} not found for {chain}")
             
-            # First approve router to spend tokens
-            approval_tx = await self.approve_token(
-                token_address,
-                router_address,
-                amount_tokens,
-                wallet_name,
-                chain,
-                gas_price
-            )
-            
-            if not approval_tx:
-                raise Exception("Token approval failed")
-            
-            # Wait for approval confirmation
-            w3.eth.wait_for_transaction_receipt(approval_tx, timeout=60)
-            
             # Get router contract
             router_contract = self._get_router_contract(chain, router)
             
-            # Build swap path
+            # Build swap path (token -> WETH)
             weth_address = self.WETH[chain]
             path = [
                 Web3.to_checksum_address(token_address),
@@ -279,13 +263,17 @@ class DEXManager:
             wallet_address = self.wallet_manager.get_wallet_address(wallet_name)
             deadline = int(datetime.now().timestamp()) + (deadline_minutes * 60)
             
+            # Convert amounts to wei
+            amount_tokens_wei = Web3.to_wei(amount_tokens, 'ether')
+            min_eth_wei = Web3.to_wei(min_eth, 'ether')
+            
             # Build transaction
             tx = router_contract.functions.swapExactTokensForETH(
-                Web3.to_wei(amount_tokens, 'ether'),  # amountIn
-                Web3.to_wei(min_eth, 'ether'),        # amountOutMin
-                path,                                  # path
-                wallet_address,                        # to
-                deadline                              # deadline
+                amount_tokens_wei,  # amountIn
+                min_eth_wei,        # amountOutMin
+                path,               # path
+                wallet_address,     # to
+                deadline           # deadline
             ).build_transaction({
                 'from': wallet_address,
                 'gas': gas_limit or 300000,
@@ -296,22 +284,31 @@ class DEXManager:
             signed_tx = self.wallet_manager.sign_transaction(wallet_name, tx, chain)
             tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             
-            self.logger.info(f"Swap transaction sent: {tx_hash.hex()}")
-            
-            # Wait for receipt
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-            
-            return {
-                'success': receipt['status'] == 1,
+            result = {
                 'tx_hash': tx_hash.hex(),
-                'gas_used': receipt['gasUsed'],
-                'block_number': receipt['blockNumber']
+                'amount_tokens': float(amount_tokens),
+                'min_eth': float(min_eth),
+                'gas_used': tx.get('gas', 0),
+                'gas_price': tx.get('gasPrice', 0),
+                'timestamp': datetime.now().isoformat()
             }
             
+            self.logger.info(f"Token -> ETH swap sent: {tx_hash.hex()}")
+            return result
+            
         except Exception as e:
-            self.logger.error(f"Swap tokens for ETH failed: {e}")
+            self.logger.error(f"Token -> ETH swap failed: {e}")
             return None
-    
+
+
+
+
+
+
+
+
+
+
     async def get_amounts_out(
         self,
         amount_in: Decimal,
@@ -320,16 +317,16 @@ class DEXManager:
         router: str = "uniswap_v2"
     ) -> Optional[List[Decimal]]:
         """
-        Get expected output amounts for a swap path.
+        Get amounts out for a swap path.
         
         Args:
             amount_in: Input amount
-            path: Token addresses in swap path
+            path: Token swap path
             chain: Chain identifier
-            router: Router to use
+            router: Router to query
             
         Returns:
-            List of output amounts for each step
+            List of amounts out for each step
         """
         try:
             w3 = self.web3_connections.get(chain)
@@ -338,33 +335,99 @@ class DEXManager:
             
             router_contract = self._get_router_contract(chain, router)
             
-            # Convert addresses to checksum
-            path_checksum = [Web3.to_checksum_address(addr) for addr in path]
+            # Convert path to checksum addresses
+            checksum_path = [Web3.to_checksum_address(addr) for addr in path]
             
-            # Call getAmountsOut
-            amounts = router_contract.functions.getAmountsOut(
-                Web3.to_wei(amount_in, 'ether'),
-                path_checksum
+            # Convert amount to wei
+            amount_in_wei = Web3.to_wei(amount_in, 'ether')
+            
+            # Query amounts out
+            amounts_out = router_contract.functions.getAmountsOut(
+                amount_in_wei,
+                checksum_path
             ).call()
             
-            # Convert to decimals
-            return [Decimal(str(amount)) / Decimal(10**18) for amount in amounts]
+            # Convert back to Decimal
+            result = [Decimal(str(amount)) / Decimal("1e18") for amount in amounts_out]
+            
+            return result
             
         except Exception as e:
             self.logger.error(f"Get amounts out failed: {e}")
             return None
-    
-    def _get_router_contract(self, chain: str, router: str) -> Contract:
-        """Get or create router contract instance."""
-        key = f"{chain}_{router}"
+
+    async def get_token_allowance(
+        self,
+        token_address: str,
+        owner_address: str,
+        spender_address: str,
+        chain: str
+    ) -> Decimal:
+        """
+        Get token allowance for spender.
         
-        if key not in self.contracts:
+        Args:
+            token_address: Token contract address
+            owner_address: Token owner address
+            spender_address: Spender address
+            chain: Chain identifier
+            
+        Returns:
+            Current allowance amount
+        """
+        try:
+            w3 = self.web3_connections.get(chain)
+            if not w3:
+                raise ValueError(f"No Web3 connection for {chain}")
+            
+            # ERC20 allowance ABI
+            allowance_abi = [{
+                "constant": True,
+                "inputs": [
+                    {"name": "_owner", "type": "address"},
+                    {"name": "_spender", "type": "address"}
+                ],
+                "name": "allowance",
+                "outputs": [{"name": "", "type": "uint256"}],
+                "type": "function"
+            }]
+            
+            token_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(token_address),
+                abi=allowance_abi
+            )
+            
+            allowance_wei = token_contract.functions.allowance(
+                Web3.to_checksum_address(owner_address),
+                Web3.to_checksum_address(spender_address)
+            ).call()
+            
+            # Convert to Decimal (assuming 18 decimals)
+            return Decimal(str(allowance_wei)) / Decimal("1e18")
+            
+        except Exception as e:
+            self.logger.error(f"Get allowance failed: {e}")
+            return Decimal("0")
+        
+
+
+
+
+
+
+
+
+
+    def _get_router_contract(self, chain: str, router: str):
+        """Get router contract instance."""
+        try:
             w3 = self.web3_connections[chain]
             router_address = self.ROUTERS[chain][router]
             
-            # Uniswap V2 Router ABI (minimal)
+            # Basic Uniswap V2 Router ABI (essential methods only)
             router_abi = [
                 {
+                    "constant": False,
                     "inputs": [
                         {"name": "amountOutMin", "type": "uint256"},
                         {"name": "path", "type": "address[]"},
@@ -373,10 +436,11 @@ class DEXManager:
                     ],
                     "name": "swapExactETHForTokens",
                     "outputs": [{"name": "amounts", "type": "uint256[]"}],
-                    "stateMutability": "payable",
+                    "payable": True,
                     "type": "function"
                 },
                 {
+                    "constant": False,
                     "inputs": [
                         {"name": "amountIn", "type": "uint256"},
                         {"name": "amountOutMin", "type": "uint256"},
@@ -386,33 +450,134 @@ class DEXManager:
                     ],
                     "name": "swapExactTokensForETH",
                     "outputs": [{"name": "amounts", "type": "uint256[]"}],
-                    "stateMutability": "nonpayable",
                     "type": "function"
                 },
                 {
+                    "constant": True,
                     "inputs": [
                         {"name": "amountIn", "type": "uint256"},
                         {"name": "path", "type": "address[]"}
                     ],
                     "name": "getAmountsOut",
                     "outputs": [{"name": "amounts", "type": "uint256[]"}],
-                    "stateMutability": "view",
                     "type": "function"
                 }
             ]
             
-            self.contracts[key] = w3.eth.contract(
+            return w3.eth.contract(
                 address=Web3.to_checksum_address(router_address),
                 abi=router_abi
             )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get router contract: {e}")
+            raise
+
+
+    async def get_pair_reserves(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get liquidity pair reserves.
         
-        return self.contracts[key]
-    
+        Args:
+            token_a: First token address
+            token_b: Second token address
+            chain: Chain identifier
+            
+        Returns:
+            Pair reserves information
+        """
+        try:
+            w3 = self.web3_connections.get(chain)
+            if not w3:
+                raise ValueError(f"No Web3 connection for {chain}")
+            
+            # Uniswap V2 Factory address (simplified)
+            factory_addresses = {
+                "ethereum": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+                "base": "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
+            }
+            
+            factory_address = factory_addresses.get(chain)
+            if not factory_address:
+                return None
+            
+            # Factory ABI (getPair method)
+            factory_abi = [{
+                "constant": True,
+                "inputs": [
+                    {"name": "tokenA", "type": "address"},
+                    {"name": "tokenB", "type": "address"}
+                ],
+                "name": "getPair",
+                "outputs": [{"name": "pair", "type": "address"}],
+                "type": "function"
+            }]
+            
+            factory_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(factory_address),
+                abi=factory_abi
+            )
+            
+            # Get pair address
+            pair_address = factory_contract.functions.getPair(
+                Web3.to_checksum_address(token_a),
+                Web3.to_checksum_address(token_b)
+            ).call()
+            
+            if pair_address == "0x0000000000000000000000000000000000000000":
+                return None
+            
+            # Pair ABI (getReserves method)
+            pair_abi = [{
+                "constant": True,
+                "inputs": [],
+                "name": "getReserves",
+                "outputs": [
+                    {"name": "_reserve0", "type": "uint112"},
+                    {"name": "_reserve1", "type": "uint112"},
+                    {"name": "_blockTimestampLast", "type": "uint32"}
+                ],
+                "type": "function"
+            }]
+            
+            pair_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(pair_address),
+                abi=pair_abi
+            )
+            
+            reserves = pair_contract.functions.getReserves().call()
+            
+            return {
+                "pair_address": pair_address,
+                "reserve0": reserves[0],
+                "reserve1": reserves[1],
+                "block_timestamp_last": reserves[2],
+                "token_a": token_a,
+                "token_b": token_b
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Get pair reserves failed: {e}")
+            return None
+
+
+
+
+
+
+
+
+
+
     async def estimate_gas_for_swap(
         self,
         token_address: str,
-        amount_in: Decimal,
-        is_buy: bool,
+        amount_eth: Decimal,
         wallet_name: str,
         chain: str,
         router: str = "uniswap_v2"
@@ -421,15 +586,14 @@ class DEXManager:
         Estimate gas for a swap transaction.
         
         Args:
-            token_address: Token address
-            amount_in: Input amount (ETH if buying, tokens if selling)
-            is_buy: True if buying tokens, False if selling
+            token_address: Token to swap
+            amount_eth: ETH amount
             wallet_name: Wallet to use
             chain: Chain identifier
             router: Router to use
             
         Returns:
-            Estimated gas units
+            Estimated gas limit
         """
         try:
             w3 = self.web3_connections.get(chain)
@@ -437,23 +601,31 @@ class DEXManager:
                 return None
             
             router_contract = self._get_router_contract(chain, router)
-            wallet_address = self.wallet_manager.get_wallet_address(wallet_name)
             
-            # Build path
+            # Build transaction for estimation
             weth_address = self.WETH[chain]
-            if is_buy:
-                path = [weth_address, token_address]
-            else:
-                path = [token_address, weth_address]
+            path = [
+                Web3.to_checksum_address(weth_address),
+                Web3.to_checksum_address(token_address)
+            ]
             
-            # Estimate based on transaction type
-            if is_buy:
-                # Estimate for buying tokens
-                return 250000  # Conservative estimate
-            else:
-                # Estimate for selling tokens (includes approval)
-                return 350000  # Higher due to approval + swap
-                
+            wallet_address = self.wallet_manager.get_wallet_address(wallet_name)
+            deadline = int(datetime.now().timestamp()) + 1200  # 20 minutes
+            
+            # Estimate gas
+            gas_estimate = router_contract.functions.swapExactETHForTokens(
+                0,  # amountOutMin (0 for estimation)
+                path,
+                wallet_address,
+                deadline
+            ).estimate_gas({
+                'from': wallet_address,
+                'value': Web3.to_wei(amount_eth, 'ether')
+            })
+            
+            # Add 20% buffer
+            return int(gas_estimate * 1.2)
+            
         except Exception as e:
-            self.logger.error(f"Gas estimation failed: {e}")
-            return 300000  # Default conservative estimate
+            self.logger.warning(f"Gas estimation failed: {e}")
+            return 300000  # Conservative fallback
