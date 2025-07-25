@@ -378,10 +378,10 @@ class EnhancedProductionSystem:
 
     async def _initialize_monitors(self) -> None:
         """
-        Initialize monitoring components with proper error handling.
+        Initialize monitoring components with corrected parameter handling.
         
-        This method fixes the AttributeError by calling the correct initialize() methods
-        and handling constructor parameters properly.
+        This method fixes the parameter mismatch issues by only passing
+        supported parameters to each monitor type.
         """
         try:
             self.logger.info("Initializing monitors...")
@@ -439,7 +439,7 @@ class EnhancedProductionSystem:
             except Exception as e:
                 self.logger.error(f"❌ Base monitor initialization failed: {e}")
             
-            # Solana monitor - SOLANA MONITOR
+            # Solana monitor - FIXED CONSTRUCTOR
             try:
                 # Check if Solana is enabled (with fallback)
                 solana_enabled = True  # Default to enabled for testing
@@ -452,12 +452,16 @@ class EnhancedProductionSystem:
                 if solana_enabled:
                     self.logger.info("Initializing Solana Monitor...")
                     
-                    # Create with supported parameters only
+                    # Create with ONLY supported parameters
                     solana_monitor = SolanaMonitor(
-                        check_interval=10.0,  # Slower to avoid rate limits
-                        scorer=getattr(self, 'trading_scorer', None),
-                        auto_trading=self.auto_trading_enabled
+                        check_interval=10.0  # Only check_interval parameter
                     )
+                    
+                    # Set additional properties after creation
+                    if hasattr(solana_monitor, 'set_scorer') and hasattr(self, 'trading_scorer'):
+                        solana_monitor.set_scorer(self.trading_scorer)
+                    if hasattr(solana_monitor, 'set_auto_trading'):
+                        solana_monitor.set_auto_trading(self.auto_trading_enabled)
                     
                     # Call the PUBLIC initialize method
                     if await solana_monitor.initialize():
@@ -472,7 +476,7 @@ class EnhancedProductionSystem:
             except Exception as e:
                 self.logger.warning(f"⚠️ Solana monitor initialization failed: {e}")
             
-            # Jupiter Solana monitor - JUPITER SOLANA MONITOR
+            # Jupiter Solana monitor - NO PARAMETERS
             try:
                 # Only initialize Jupiter if Solana is enabled
                 solana_enabled = True  # Default to enabled for testing
@@ -515,7 +519,6 @@ class EnhancedProductionSystem:
             self.logger.error(f"❌ CRITICAL: Failed to initialize monitors: {e}")
             self.logger.error("   This will prevent the system from detecting opportunities")
             raise
-
 
     # ADDITIONAL HELPER METHODS TO ADD TO THE EnhancedProductionSystem CLASS
 
@@ -633,28 +636,81 @@ class EnhancedProductionSystem:
             self.logger.warning("Continuing without web dashboard")
 
     async def _run_monitoring_loop(self) -> None:
-        """Main monitoring loop."""
-        self.logger.info("🔍 Starting main monitoring loop...")
+        """
+        Run the main monitoring loop with proper monitor handling.
         
+        This method fixes the 'start_monitoring' AttributeError by using the correct
+        BaseMonitor pattern of calling start() on each monitor.
+        """
         try:
-            # Start all monitors
+            self.logger.info("🔍 Starting main monitoring loop...")
+            
+            # Start all monitors using the BaseMonitor.start() method
             monitor_tasks = []
+            
             for monitor in self.monitors:
-                task = asyncio.create_task(monitor.start_monitoring())
-                monitor_tasks.append(task)
+                try:
+                    # Each monitor runs in its own task
+                    task = asyncio.create_task(
+                        monitor.start(),
+                        name=f"monitor_{getattr(monitor, 'name', 'unknown')}"
+                    )
+                    monitor_tasks.append(task)
+                    
+                    self.logger.info(f"✅ Started monitor: {getattr(monitor, 'name', 'unknown')}")
+                    
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to start monitor {getattr(monitor, 'name', 'unknown')}: {e}")
             
-            # Start performance monitoring
-            perf_task = asyncio.create_task(self._performance_monitor_loop())
+            if not monitor_tasks:
+                raise RuntimeError("No monitors were successfully started")
             
-            # Wait for all tasks
-            await asyncio.gather(*monitor_tasks, perf_task, return_exceptions=True)
+            self.logger.info(f"🚀 {len(monitor_tasks)} monitors running concurrently")
+            self.logger.info("📊 System is now actively monitoring for opportunities...")
+            self.logger.info("💡 Press Ctrl+C to stop the system")
             
-        except KeyboardInterrupt:
-            self.logger.info("Shutdown requested by user")
+            # Run all monitor tasks concurrently
+            try:
+                await asyncio.gather(*monitor_tasks, return_exceptions=False)
+            except asyncio.CancelledError:
+                self.logger.info("📋 Monitoring loop cancelled")
+                # Cancel all monitor tasks
+                for task in monitor_tasks:
+                    if not task.done():
+                        task.cancel()
+                
+                # Wait for tasks to complete cancellation
+                await asyncio.gather(*monitor_tasks, return_exceptions=True)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Monitor task failed: {e}")
+                # Cancel remaining tasks
+                for task in monitor_tasks:
+                    if not task.done():
+                        task.cancel()
+                raise
+                
         except Exception as e:
-            self.logger.error(f"Monitoring loop error: {e}")
-        finally:
-            self.is_running = False
+            self.logger.error(f"💥 CRITICAL: Monitoring loop error: {e}")
+            raise
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     async def _performance_monitor_loop(self) -> None:
         """Monitor system performance and log statistics."""

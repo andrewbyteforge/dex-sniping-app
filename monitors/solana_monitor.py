@@ -21,30 +21,83 @@ class SolanaMonitor(BaseMonitor):
     Focuses on Pump.fun for new token detection and Raydium for DEX pairs.
     """
     
-    def __init__(self, check_interval: float = 1.0):  # Very fast for Solana
-        """Initialize the Solana monitor."""
+    def __init__(
+        self, 
+        check_interval: float = 1.0
+    ) -> None:
+        """
+        Initialize the Solana monitor.
+        
+        Args:
+            check_interval: Seconds between checks (very fast for Solana)
+        """
         super().__init__("Solana", check_interval)
         
-        self.solana_config = multichain_settings.solana
+        # Remove scorer and auto_trading from constructor - these will be set later if needed
+        self.scorer = None
+        self.auto_trading = False
+        
+        # Configuration
+        try:
+            self.solana_config = multichain_settings.solana
+        except Exception:
+            # Fallback configuration if multichain_settings not available
+            from types import SimpleNamespace
+            self.solana_config = SimpleNamespace(
+                pump_fun_api="https://frontend-api.pump.fun",
+                raydium_api="https://api.raydium.io/v2",
+                enabled=True
+            )
+        
+        # Session and state management
         self.session: Optional[aiohttp.ClientSession] = None
         self.processed_tokens: set = set()
         self.last_check_time = datetime.now()
         
-    async def _initialize(self) -> None:
-        """Initialize Solana connections."""
-        try:
-            # Initialize HTTP session
-            timeout = aiohttp.ClientTimeout(total=10)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+        # Statistics tracking
+        self.stats = {
+            "tokens_processed": 0,
+            "opportunities_found": 0,
+            "errors_count": 0,
+            "last_error": None,
+            "uptime_start": datetime.now(),
+            "pump_fun_tokens": 0,
+            "raydium_pairs": 0
+        }
+        
+        # Known tokens to skip (common Solana tokens)
+        self.known_tokens = {
+            "So11111111111111111111111111111111111111112",  # SOL
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
+            "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # WIF
+            "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",  # POPCAT
+        }
+
+    def set_scorer(self, scorer: Any) -> None:
+        """Set the trading scorer after initialization."""
+        self.scorer = scorer
+
+    def set_auto_trading(self, enabled: bool) -> None:
+        """Set auto trading mode after initialization."""
+        self.auto_trading = enabled
             
-            # Test connection to Pump.fun API
-            await self._test_pump_fun_connection()
-            
-            self.logger.info("Connected to Solana ecosystem")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Solana: {e}")
-            raise
+        async def _initialize(self) -> None:
+            """Initialize Solana connections."""
+            try:
+                # Initialize HTTP session
+                timeout = aiohttp.ClientTimeout(total=10)
+                self.session = aiohttp.ClientSession(timeout=timeout)
+                
+                # Test connection to Pump.fun API
+                await self._test_pump_fun_connection()
+                
+                self.logger.info("Connected to Solana ecosystem")
+                
+            except Exception as e:
+                self.logger.error(f"Failed to initialize Solana: {e}")
+                raise
             
     async def _test_pump_fun_connection(self) -> None:
         """Test connection to Pump.fun API."""
