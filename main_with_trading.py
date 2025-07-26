@@ -15,6 +15,8 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
 from monitors.raydium_monitor import RaydiumMonitor
+import signal
+import sys
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -127,6 +129,145 @@ class EnhancedTradingSystem:
             "position_count": 0,
             "daily_pnl": 0.0
         }
+
+    def setup_signal_handlers(self) -> None:
+        """
+        Set up signal handlers for graceful shutdown.
+        
+        This enables Ctrl+C and other termination signals to properly
+        shut down the system instead of hanging.
+        """
+        def signal_handler(signum, frame):
+            """Handle shutdown signals."""
+            signal_name = signal.Signals(signum).name
+            self.logger.info(f"🛑 Received {signal_name} signal, initiating graceful shutdown...")
+            
+            # Set a flag to stop the main loop
+            if hasattr(self, '_shutdown_event'):
+                self._shutdown_event.set()
+            
+            # If we're in an event loop, create a task to shutdown
+            try:
+                loop = asyncio.get_running_loop()
+                if not loop.is_closed():
+                    loop.create_task(self._graceful_shutdown())
+            except RuntimeError:
+                # No event loop running, force exit
+                self.logger.warning("No event loop running, forcing exit...")
+                sys.exit(0)
+        
+        # Register signal handlers
+        signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+        signal.signal(signal.SIGTERM, signal_handler)  # Termination request
+        
+        if sys.platform != "win32":
+            # Unix-specific signals
+            signal.signal(signal.SIGHUP, signal_handler)   # Hangup
+            signal.signal(signal.SIGQUIT, signal_handler)  # Quit
+        
+        self.logger.info("✅ Signal handlers registered (Ctrl+C will now work)")
+
+    async def _graceful_shutdown(self) -> None:
+        """
+        Perform graceful shutdown of the system.
+        
+        This method ensures all components are properly stopped and
+        resources are cleaned up before exit.
+        """
+        try:
+            self.logger.info("🔄 Starting graceful shutdown sequence...")
+            
+            # Stop all monitors first
+            self.logger.info("Stopping monitors...")
+            for monitor in self.monitors:
+                try:
+                    if hasattr(monitor, 'stop'):
+                        monitor.stop()
+                    self.logger.info(f"✅ {monitor.__class__.__name__} stopped")
+                except Exception as e:
+                    self.logger.warning(f"Error stopping {monitor.__class__.__name__}: {e}")
+            
+            # Stop trading components
+            if hasattr(self, 'trading_executor') and self.trading_executor:
+                try:
+                    if hasattr(self.trading_executor, 'stop'):
+                        self.trading_executor.stop()
+                    self.logger.info("✅ Trading executor stopped")
+                except Exception as e:
+                    self.logger.warning(f"Error stopping trading executor: {e}")
+            
+            # Cleanup all resources
+            await self.cleanup()
+            
+            self.logger.info("✅ Graceful shutdown completed")
+            
+            # Force exit after cleanup
+            sys.exit(0)
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error during graceful shutdown: {e}")
+            # Force exit even if cleanup fails
+            sys.exit(1)
+
+    def create_shutdown_event(self) -> None:
+        """Create shutdown event for clean termination."""
+        self._shutdown_event = asyncio.Event()
+
+    async def run_with_signal_handling(self) -> None:
+        """
+        Run the trading system with proper signal handling.
+        
+        This method replaces the regular run() method and includes
+        signal handling for graceful shutdown.
+        """
+        try:
+            # Setup signal handlers
+            self.setup_signal_handlers()
+            
+            # Create shutdown event
+            self.create_shutdown_event()
+            
+            # Initialize the system
+            await self.initialize()
+            
+            # Start all monitors
+            self.logger.info("🚀 Starting all monitors...")
+            monitor_tasks = []
+            
+            for monitor in self.monitors:
+                try:
+                    if hasattr(monitor, 'start'):
+                        task = asyncio.create_task(monitor.start())
+                        monitor_tasks.append(task)
+                        self.logger.info(f"✅ {monitor.__class__.__name__} started")
+                except Exception as e:
+                    self.logger.error(f"Failed to start {monitor.__class__.__name__}: {e}")
+            
+            self.logger.info(f"🎯 All {len(monitor_tasks)} monitors started successfully")
+            self.logger.info("💡 Press Ctrl+C to stop the system gracefully")
+            
+            # Wait for shutdown signal
+            await self._shutdown_event.wait()
+            
+            self.logger.info("🛑 Shutdown signal received, stopping...")
+            
+            # Cancel all monitor tasks
+            for task in monitor_tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for tasks to complete
+            if monitor_tasks:
+                await asyncio.gather(*monitor_tasks, return_exceptions=True)
+            
+            self.logger.info("✅ All monitors stopped")
+            
+        except KeyboardInterrupt:
+            self.logger.info("🛑 KeyboardInterrupt received, shutting down...")
+            await self._graceful_shutdown()
+        except Exception as e:
+            self.logger.error(f"💥 Error in main run loop: {e}")
+            await self._graceful_shutdown()
 
     async def initialize(self) -> None:
         """Initialize all system components."""
@@ -1563,163 +1704,9 @@ class EnhancedTradingSystem:
 
 #!/usr/bin/env python3
 """
-Signal handling fix for main_with_trading.py to enable proper Ctrl+C shutdown
-
-ADD this code to main_with_trading.py to enable graceful shutdown with Ctrl+C
+REPLACE the main() function at the bottom of main_with_trading.py with this version
 """
 
-import signal
-import sys
-import asyncio
-from typing import Optional
-
-# ADD this near the top of main_with_trading.py with other imports
-import signal
-import sys
-
-# ADD this method to the EnhancedTradingSystem class
-def setup_signal_handlers(self) -> None:
-    """
-    Set up signal handlers for graceful shutdown.
-    
-    This enables Ctrl+C and other termination signals to properly
-    shut down the system instead of hanging.
-    """
-    def signal_handler(signum, frame):
-        """Handle shutdown signals."""
-        signal_name = signal.Signals(signum).name
-        self.logger.info(f"🛑 Received {signal_name} signal, initiating graceful shutdown...")
-        
-        # Set a flag to stop the main loop
-        if hasattr(self, '_shutdown_event'):
-            self._shutdown_event.set()
-        
-        # If we're in an event loop, create a task to shutdown
-        try:
-            loop = asyncio.get_running_loop()
-            if not loop.is_closed():
-                loop.create_task(self._graceful_shutdown())
-        except RuntimeError:
-            # No event loop running, force exit
-            self.logger.warning("No event loop running, forcing exit...")
-            sys.exit(0)
-    
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # Termination request
-    
-    if sys.platform != "win32":
-        # Unix-specific signals
-        signal.signal(signal.SIGHUP, signal_handler)   # Hangup
-        signal.signal(signal.SIGQUIT, signal_handler)  # Quit
-    
-    self.logger.info("✅ Signal handlers registered (Ctrl+C will now work)")
-
-# ADD this method to the EnhancedTradingSystem class
-async def _graceful_shutdown(self) -> None:
-    """
-    Perform graceful shutdown of the system.
-    
-    This method ensures all components are properly stopped and
-    resources are cleaned up before exit.
-    """
-    try:
-        self.logger.info("🔄 Starting graceful shutdown sequence...")
-        
-        # Stop all monitors first
-        self.logger.info("Stopping monitors...")
-        for monitor in self.monitors:
-            try:
-                if hasattr(monitor, 'stop'):
-                    monitor.stop()
-                self.logger.info(f"✅ {monitor.__class__.__name__} stopped")
-            except Exception as e:
-                self.logger.warning(f"Error stopping {monitor.__class__.__name__}: {e}")
-        
-        # Stop trading components
-        if hasattr(self, 'trading_executor') and self.trading_executor:
-            try:
-                self.trading_executor.stop()
-                self.logger.info("✅ Trading executor stopped")
-            except Exception as e:
-                self.logger.warning(f"Error stopping trading executor: {e}")
-        
-        # Cleanup all resources
-        await self.cleanup()
-        
-        self.logger.info("✅ Graceful shutdown completed")
-        
-        # Force exit after cleanup
-        sys.exit(0)
-        
-    except Exception as e:
-        self.logger.error(f"💥 Error during graceful shutdown: {e}")
-        # Force exit even if cleanup fails
-        sys.exit(1)
-
-# ADD this method to the EnhancedTradingSystem class
-def create_shutdown_event(self) -> None:
-    """Create shutdown event for clean termination."""
-    self._shutdown_event = asyncio.Event()
-
-# MODIFY the existing run method or ADD this new method to the EnhancedTradingSystem class
-async def run_with_signal_handling(self) -> None:
-    """
-    Run the trading system with proper signal handling.
-    
-    This method replaces the regular run() method and includes
-    signal handling for graceful shutdown.
-    """
-    try:
-        # Setup signal handlers
-        self.setup_signal_handlers()
-        
-        # Create shutdown event
-        self.create_shutdown_event()
-        
-        # Initialize the system
-        await self.initialize()
-        
-        # Start all monitors
-        self.logger.info("🚀 Starting all monitors...")
-        monitor_tasks = []
-        
-        for monitor in self.monitors:
-            try:
-                if hasattr(monitor, 'start'):
-                    task = asyncio.create_task(monitor.start())
-                    monitor_tasks.append(task)
-                    self.logger.info(f"✅ {monitor.__class__.__name__} started")
-            except Exception as e:
-                self.logger.error(f"Failed to start {monitor.__class__.__name__}: {e}")
-        
-        self.logger.info(f"🎯 All {len(monitor_tasks)} monitors started successfully")
-        self.logger.info("💡 Press Ctrl+C to stop the system gracefully")
-        
-        # Wait for shutdown signal
-        await self._shutdown_event.wait()
-        
-        self.logger.info("🛑 Shutdown signal received, stopping...")
-        
-        # Cancel all monitor tasks
-        for task in monitor_tasks:
-            if not task.done():
-                task.cancel()
-        
-        # Wait for tasks to complete
-        if monitor_tasks:
-            await asyncio.gather(*monitor_tasks, return_exceptions=True)
-        
-        self.logger.info("✅ All monitors stopped")
-        
-    except KeyboardInterrupt:
-        self.logger.info("🛑 KeyboardInterrupt received, shutting down...")
-        await self._graceful_shutdown()
-    except Exception as e:
-        self.logger.error(f"💥 Error in main run loop: {e}")
-        await self._graceful_shutdown()
-
-# UPDATE the main() function at the bottom of main_with_trading.py
 async def main():
     """
     Enhanced main function with proper signal handling.
@@ -1758,7 +1745,7 @@ async def main():
         print(f"💥 System error: {e}")
         sys.exit(1)
 
-# UPDATE the if __name__ == "__main__" block at the bottom
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
@@ -1768,53 +1755,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"💥 Fatal error: {e}")
         sys.exit(1)
-
-# ===================================================================
-# ALTERNATIVE QUICK FIX - If you want a minimal change:
-# ===================================================================
-
-# Just ADD this to the existing main() function in main_with_trading.py:
-
-async def main_with_interrupt_handling():
-    """Quick fix version - just add keyboard interrupt handling."""
-    try:
-        # Your existing main() code here
-        system = EnhancedTradingSystem(...)
-        await system.initialize()
-        
-        # Add this try/except around the main loop
-        try:
-            await system.run()  # or whatever your current run method is
-        except KeyboardInterrupt:
-            print("\n🛑 Shutdown requested by user...")
-            await system.cleanup()
-            print("✅ System shutdown complete")
-            
-    except KeyboardInterrupt:
-        print("\n🛑 Interrupted during startup")
-    except Exception as e:
-        print(f"💥 Error: {e}")
-    finally:
-        sys.exit(0)
-
-# ===================================================================
-# WINDOWS-SPECIFIC FIX (if on Windows):
-# ===================================================================
-
-# On Windows, you might need this additional handler:
-if sys.platform == "win32":
-    import winsound
-    
-    def windows_ctrl_handler(ctrl_type):
-        """Handle Windows console control events."""
-        if ctrl_type in (0, 2):  # Ctrl+C or Ctrl+Break
-            print("\n🛑 Windows interrupt received...")
-            return True
-        return False
-    
-    # Register Windows console handler
-    try:
-        import win32api
-        win32api.SetConsoleCtrlHandler(windows_ctrl_handler, True)
-    except ImportError:
-        pass  # win32api not available

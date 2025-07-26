@@ -477,7 +477,7 @@ class BaseChainMonitor(BaseMonitor):
         
         Args:
             pair_address: Pair contract address
-            token0_address: First token address
+            token0_address: First token address  
             token1_address: Second token address
             block_number: Block where pair was created
             
@@ -485,31 +485,53 @@ class BaseChainMonitor(BaseMonitor):
             LiquidityInfo object or None if failed
         """
         try:
-            # Simplified liquidity info - in production this would query the pair contract
+            # FIXED: Use correct LiquidityInfo parameters
             return LiquidityInfo(
                 pair_address=pair_address,
-                token0_address=token0_address,
-                token1_address=token1_address,
-                token0_reserve=Decimal('0'),  # Would query actual reserves
-                token1_reserve=Decimal('0'),  # Would query actual reserves
-                total_supply=Decimal('0'),    # Would query LP token supply
-                block_number=block_number,
-                dex="baseswap"  # Base chain DEX
+                dex_name="baseswap",    # Base chain DEX
+                token0=token0_address,  # Correct parameter name
+                token1=token1_address,  # Correct parameter name
+                reserve0=0.0,           # Would query actual reserves
+                reserve1=0.0,           # Would query actual reserves  
+                liquidity_usd=0.0,      # Would calculate from reserves
+                created_at=datetime.now(),
+                block_number=block_number
             )
             
         except Exception as e:
             self.logger.error(f"Failed to get Base liquidity info for {pair_address}: {e}")
             return None
 
+
+
+
+
+
+
+
+
+
+
     async def _cleanup(self) -> None:
-        """
-        Cleanup resources when stopping.
-        """
+        """Cleanup resources when stopping."""
         try:
+            # Close any open sessions  
+            if hasattr(self, 'session') and self.session:
+                if not self.session.closed:
+                    await self.session.close()
+                self.session = None
+                
             self.logger.info("Base Chain Monitor cleanup completed")
             
         except Exception as e:
-            self.logger.error(f"Error during Base cleanup: {e}")
+            self.logger.error(f"Error during cleanup: {e}")
+
+
+
+
+
+
+
 
     def get_stats(self) -> Dict[str, Any]:
         """
