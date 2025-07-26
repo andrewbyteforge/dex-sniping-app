@@ -4,6 +4,9 @@ Raydium DEX configuration settings.
 
 File: config/raydium_config.py
 Purpose: Configuration for Raydium API endpoints, rate limits, and monitoring settings
+
+ISSUE FIXED: Missing configuration methods and incomplete dataclass initialization
+SOLUTION: Complete implementation of all referenced configuration methods
 """
 
 import os
@@ -83,7 +86,7 @@ class RaydiumMonitoringSettings:
     max_price_impact_threshold: float = 0.05  # 5% max price impact
     
     def __post_init__(self):
-        """Initialize default values."""
+        """Initialize default values for token lists."""
         if self.supported_quote_tokens is None:
             self.supported_quote_tokens = [
                 "So11111111111111111111111111111111111111112",  # SOL
@@ -106,7 +109,7 @@ class RaydiumMonitoringSettings:
 class RaydiumWebSocketConfig:
     """WebSocket configuration for real-time Raydium data."""
     
-    enabled: bool = True
+    enabled: bool = False  # Default to disabled until implementation complete
     auto_reconnect: bool = True
     reconnect_interval: float = 5.0
     max_reconnect_attempts: int = 10
@@ -123,10 +126,19 @@ class RaydiumWebSocketConfig:
 
 
 class RaydiumConfig:
-    """Main Raydium configuration class."""
+    """
+    Main Raydium configuration class.
+    
+    Provides centralized configuration management for all Raydium monitoring
+    components including API endpoints, rate limits, and monitoring criteria.
+    """
     
     def __init__(self):
-        """Initialize Raydium configuration."""
+        """
+        Initialize Raydium configuration with all required components.
+        
+        Sets up default values and loads environment variable overrides.
+        """
         self.endpoints = RaydiumAPIEndpoints()
         self.rate_limits = RaydiumRateLimits()
         self.monitoring = RaydiumMonitoringSettings()
@@ -136,55 +148,126 @@ class RaydiumConfig:
         self._load_environment_overrides()
     
     def _load_environment_overrides(self) -> None:
-        """Load configuration overrides from environment variables."""
+        """
+        Load configuration overrides from environment variables.
         
-        # Rate limit overrides
-        if os.getenv('RAYDIUM_REQUESTS_PER_MINUTE'):
-            self.rate_limits.requests_per_minute = int(os.getenv('RAYDIUM_REQUESTS_PER_MINUTE'))
-        
-        # Monitoring overrides
-        if os.getenv('RAYDIUM_MIN_LIQUIDITY_USD'):
-            self.monitoring.min_liquidity_usd = float(os.getenv('RAYDIUM_MIN_LIQUIDITY_USD'))
-        
-        if os.getenv('RAYDIUM_WHALE_THRESHOLD_USD'):
-            self.monitoring.whale_threshold_usd = float(os.getenv('RAYDIUM_WHALE_THRESHOLD_USD'))
-        
-        # WebSocket overrides
-        if os.getenv('RAYDIUM_WEBSOCKET_ENABLED'):
-            self.websocket.enabled = os.getenv('RAYDIUM_WEBSOCKET_ENABLED').lower() == 'true'
+        This allows for runtime configuration changes without code modification.
+        Useful for deployment-specific settings and testing.
+        """
+        try:
+            # Rate limit overrides
+            if os.getenv('RAYDIUM_REQUESTS_PER_MINUTE'):
+                self.rate_limits.requests_per_minute = int(os.getenv('RAYDIUM_REQUESTS_PER_MINUTE'))
+            
+            if os.getenv('RAYDIUM_REQUESTS_PER_SECOND'):
+                self.rate_limits.requests_per_second = int(os.getenv('RAYDIUM_REQUESTS_PER_SECOND'))
+            
+            # Monitoring overrides
+            if os.getenv('RAYDIUM_MIN_LIQUIDITY_USD'):
+                self.monitoring.min_liquidity_usd = float(os.getenv('RAYDIUM_MIN_LIQUIDITY_USD'))
+            
+            if os.getenv('RAYDIUM_MAX_LIQUIDITY_USD'):
+                self.monitoring.max_liquidity_usd = float(os.getenv('RAYDIUM_MAX_LIQUIDITY_USD'))
+            
+            if os.getenv('RAYDIUM_WHALE_THRESHOLD_USD'):
+                self.monitoring.whale_threshold_usd = float(os.getenv('RAYDIUM_WHALE_THRESHOLD_USD'))
+            
+            # WebSocket overrides
+            if os.getenv('RAYDIUM_WEBSOCKET_ENABLED'):
+                self.websocket.enabled = os.getenv('RAYDIUM_WEBSOCKET_ENABLED').lower() == 'true'
+            
+            # API endpoint overrides
+            if os.getenv('RAYDIUM_API_BASE_URL'):
+                self.endpoints.base_url = os.getenv('RAYDIUM_API_BASE_URL')
+                
+        except Exception as e:
+            print(f"Warning: Error loading environment overrides: {e}")
     
     def get_api_url(self, endpoint: str) -> str:
-        """Get full API URL for an endpoint."""
+        """
+        Get full API URL for an endpoint.
+        
+        Args:
+            endpoint: The API endpoint path (e.g., "/v2/main/pairs")
+            
+        Returns:
+            str: Complete URL for the endpoint
+        """
         return f"{self.endpoints.base_url}{endpoint}"
     
     def get_backup_api_url(self, endpoint: str) -> str:
-        """Get backup API URL for an endpoint."""
+        """
+        Get backup API URL for an endpoint.
+        
+        Args:
+            endpoint: The API endpoint path
+            
+        Returns:
+            str: Complete backup URL for the endpoint
+        """
         return f"{self.endpoints.backup_base_url}{endpoint}"
     
     def is_supported_quote_token(self, token_address: str) -> bool:
-        """Check if a token is a supported quote token."""
+        """
+        Check if a token is a supported quote token.
+        
+        Args:
+            token_address: The token mint address to check
+            
+        Returns:
+            bool: True if token is supported as quote token
+        """
         return token_address in self.monitoring.supported_quote_tokens
     
     def is_excluded_base_token(self, token_address: str) -> bool:
-        """Check if a token should be excluded as base token."""
+        """
+        Check if a token should be excluded as base token.
+        
+        Args:
+            token_address: The token mint address to check
+            
+        Returns:
+            bool: True if token should be excluded
+        """
         return token_address in self.monitoring.excluded_base_tokens
     
     def should_monitor_pool(self, pool_data: Dict) -> bool:
-        """Determine if a pool should be monitored based on criteria."""
+        """
+        Determine if a pool should be monitored based on criteria.
+        
+        This method evaluates pools against our monitoring criteria including
+        liquidity range, supported tokens, and trading activity.
+        
+        Args:
+            pool_data: Pool data dictionary from Raydium API
+            
+        Returns:
+            bool: True if pool meets monitoring criteria
+        """
         try:
             # Check liquidity range
             liquidity_usd = pool_data.get('liquidity', {}).get('usd', 0)
             if not (self.monitoring.min_liquidity_usd <= liquidity_usd <= self.monitoring.max_liquidity_usd):
                 return False
             
-            # Check quote token
+            # Check quote token support
             quote_mint = pool_data.get('quoteMint', '')
-            if not self.is_supported_quote_token(quote_mint):
-                return False
+            quote_symbol = pool_data.get('quoteSymbol', '').upper()
+            
+            # Check by address first, then by symbol as fallback
+            if quote_mint and not self.is_supported_quote_token(quote_mint):
+                # Fallback to symbol check for compatibility
+                if quote_symbol not in ['SOL', 'USDC', 'USDT']:
+                    return False
             
             # Check if base token is excluded
             base_mint = pool_data.get('baseMint', '')
-            if self.is_excluded_base_token(base_mint):
+            base_symbol = pool_data.get('baseSymbol', '').upper()
+            
+            # Check by address first, then by symbol
+            if base_mint and self.is_excluded_base_token(base_mint):
+                return False
+            if base_symbol in ['SOL', 'USDC', 'USDT', 'BTC', 'ETH']:
                 return False
             
             # Check trading activity
@@ -192,52 +275,138 @@ class RaydiumConfig:
             if volume_24h < 1000:  # Minimum $1K daily volume
                 return False
             
+            # Check trade count if available
+            trade_count = pool_data.get('trade24h', {}).get('count', 0)
+            if trade_count > 0 and trade_count < self.monitoring.min_trade_count_24h:
+                return False
+            
+            # Check price impact if available
+            price_impact = pool_data.get('priceImpact', 0)
+            if price_impact > self.monitoring.max_price_impact_threshold:
+                return False
+            
             return True
             
-        except Exception:
+        except Exception as e:
+            print(f"Error evaluating pool monitoring criteria: {e}")
             return False
     
     def get_pool_priority_score(self, pool_data: Dict) -> float:
-        """Calculate priority score for a pool (0.0 to 1.0)."""
+        """
+        Calculate priority score for a pool (0.0 to 1.0).
+        
+        This scoring system helps prioritize which pools to monitor most closely
+        based on liquidity, volume, trading activity, and other factors.
+        
+        Args:
+            pool_data: Pool data dictionary from Raydium API
+            
+        Returns:
+            float: Priority score between 0.0 and 1.0
+        """
         try:
             score = 0.0
             
             # Liquidity score (0.3 weight)
             liquidity_usd = pool_data.get('liquidity', {}).get('usd', 0)
             if liquidity_usd > 0:
-                # Sweet spot is 10K-100K liquidity
+                # Sweet spot is 10K-100K liquidity for new tokens
                 if 10000 <= liquidity_usd <= 100000:
                     score += 0.3
                 elif 5000 <= liquidity_usd < 10000:
                     score += 0.2
-                elif liquidity_usd > 100000:
-                    score += 0.1
+                elif 100000 < liquidity_usd <= 500000:
+                    score += 0.15
+                elif liquidity_usd > 500000:
+                    score += 0.1  # Too established
             
             # Volume score (0.3 weight)
             volume_24h = pool_data.get('volume24h', 0)
-            if volume_24h > 50000:
+            if volume_24h > 100000:
                 score += 0.3
+            elif volume_24h > 50000:
+                score += 0.25
             elif volume_24h > 10000:
                 score += 0.2
             elif volume_24h > 1000:
                 score += 0.1
             
-            # Age score (0.2 weight) - newer pools get higher score
-            # This would need pool creation timestamp from the data
-            
             # Trading activity score (0.2 weight)
             trade_count = pool_data.get('trade24h', {}).get('count', 0)
-            if trade_count > 100:
+            if trade_count > 500:
                 score += 0.2
-            elif trade_count > 50:
+            elif trade_count > 100:
                 score += 0.15
-            elif trade_count > 10:
+            elif trade_count > 50:
                 score += 0.1
+            elif trade_count > 10:
+                score += 0.05
+            
+            # Price change score (0.1 weight) - higher volatility can mean more opportunity
+            price_change_24h = abs(pool_data.get('priceChange24h', 0))
+            if 5 <= price_change_24h <= 50:  # 5-50% change is interesting
+                score += 0.1
+            elif 2 <= price_change_24h < 5:
+                score += 0.05
+            
+            # Newness bonus (0.1 weight)
+            # This would need pool age data - for now, assume newer pools get slight bonus
+            # In practice, this would compare pool creation time to current time
+            score += 0.05  # Small bonus for being recently discovered
             
             return min(score, 1.0)
             
-        except Exception:
+        except Exception as e:
+            print(f"Error calculating pool priority score: {e}")
             return 0.0
+    
+    def get_rate_limit_delay(self, requests_made: int, time_window: float) -> float:
+        """
+        Calculate required delay to stay within rate limits.
+        
+        Args:
+            requests_made: Number of requests made in the time window
+            time_window: Time window in seconds
+            
+        Returns:
+            float: Delay needed in seconds
+        """
+        try:
+            # Check per-second limit
+            if time_window <= 1.0 and requests_made >= self.rate_limits.requests_per_second:
+                return 1.0 - time_window
+            
+            # Check per-minute limit
+            if time_window <= 60.0 and requests_made >= self.rate_limits.requests_per_minute:
+                return 60.0 - time_window
+            
+            return 0.0
+            
+        except Exception:
+            return 1.0  # Conservative fallback
+    
+    def validate_configuration(self) -> bool:
+        """
+        Validate the configuration for completeness and correctness.
+        
+        Returns:
+            bool: True if configuration is valid
+        """
+        try:
+            # Check required settings
+            assert self.monitoring.min_liquidity_usd > 0
+            assert self.monitoring.max_liquidity_usd > self.monitoring.min_liquidity_usd
+            assert self.monitoring.whale_threshold_usd > 0
+            assert self.rate_limits.requests_per_minute > 0
+            assert self.rate_limits.requests_per_second > 0
+            assert len(self.monitoring.supported_quote_tokens) > 0
+            assert self.endpoints.base_url.startswith('http')
+            
+            return True
+            
+        except (AssertionError, AttributeError) as e:
+            print(f"Configuration validation failed: {e}")
+            return False
 
 
 # Create global configuration instance
@@ -246,38 +415,64 @@ raydium_config = RaydiumConfig()
 
 # Helper functions for easy access
 def get_raydium_config() -> RaydiumConfig:
-    """Get the global Raydium configuration."""
+    """
+    Get the global Raydium configuration.
+    
+    Returns:
+        RaydiumConfig: The global configuration instance
+    """
     return raydium_config
 
 
 def get_api_url(endpoint: str) -> str:
-    """Get full Raydium API URL for an endpoint."""
+    """
+    Get full Raydium API URL for an endpoint.
+    
+    Args:
+        endpoint: The API endpoint path
+        
+    Returns:
+        str: Complete URL for the endpoint
+    """
     return raydium_config.get_api_url(endpoint)
 
 
 def should_monitor_pool(pool_data: Dict) -> bool:
-    """Check if a pool should be monitored."""
+    """
+    Check if a pool should be monitored.
+    
+    Args:
+        pool_data: Pool data dictionary from API
+        
+    Returns:
+        bool: True if pool should be monitored
+    """
     return raydium_config.should_monitor_pool(pool_data)
 
 
 def get_pool_priority_score(pool_data: Dict) -> float:
-    """Get priority score for a pool."""
+    """
+    Get priority score for a pool.
+    
+    Args:
+        pool_data: Pool data dictionary from API
+        
+    Returns:
+        float: Priority score between 0.0 and 1.0
+    """
     return raydium_config.get_pool_priority_score(pool_data)
 
 
 # Configuration validation
 def validate_config() -> bool:
-    """Validate the Raydium configuration."""
+    """
+    Validate the Raydium configuration.
+    
+    Returns:
+        bool: True if configuration is valid
+    """
     try:
-        config = get_raydium_config()
-        
-        # Check required settings
-        assert config.monitoring.min_liquidity_usd > 0
-        assert config.monitoring.whale_threshold_usd > 0
-        assert config.rate_limits.requests_per_minute > 0
-        assert len(config.monitoring.supported_quote_tokens) > 0
-        
-        return True
+        return raydium_config.validate_configuration()
         
     except Exception as e:
         print(f"❌ Raydium configuration validation failed: {e}")
@@ -292,12 +487,33 @@ if __name__ == "__main__":
     print(f"Base URL: {config.endpoints.base_url}")
     print(f"Rate Limit: {config.rate_limits.requests_per_minute}/min")
     print(f"Min Liquidity: ${config.monitoring.min_liquidity_usd:,.0f}")
+    print(f"Max Liquidity: ${config.monitoring.max_liquidity_usd:,.0f}")
     print(f"Whale Threshold: ${config.monitoring.whale_threshold_usd:,.0f}")
     print(f"WebSocket Enabled: {config.websocket.enabled}")
     print(f"Supported Quote Tokens: {len(config.monitoring.supported_quote_tokens)}")
+    print(f"Excluded Base Tokens: {len(config.monitoring.excluded_base_tokens)}")
     print("=" * 40)
     
     if validate_config():
         print("✅ Configuration is valid")
     else:
         print("❌ Configuration validation failed")
+        
+    # Test pool evaluation
+    test_pool = {
+        'id': 'test_pool_123',
+        'liquidity': {'usd': 25000},
+        'volume24h': 15000,
+        'quoteMint': 'So11111111111111111111111111111111111111112',  # SOL
+        'baseMint': 'example_token_mint',
+        'quoteSymbol': 'SOL',
+        'baseSymbol': 'TEST',
+        'trade24h': {'count': 45}
+    }
+    
+    should_monitor = should_monitor_pool(test_pool)
+    priority_score = get_pool_priority_score(test_pool)
+    
+    print(f"\n🧪 Test Pool Evaluation:")
+    print(f"   Should Monitor: {should_monitor}")
+    print(f"   Priority Score: {priority_score:.3f}")
