@@ -168,6 +168,7 @@ class TelegramNotifier:
             self.logger.error(f"Failed to start Telegram notifier: {e}")
             return False
 
+    # Update the stop method to call cleanup:
     async def stop(self) -> None:
         """Stop the Telegram notifier and cleanup resources."""
         try:
@@ -178,10 +179,7 @@ class TelegramNotifier:
                     AlertPriority.MEDIUM
                 )
             
-            if self.session:
-                await self.session.close()
-                self.session = None
-                
+            await self.cleanup()
             self.logger.info("Telegram notifier stopped")
             
         except Exception as e:
@@ -212,9 +210,9 @@ class TelegramNotifier:
             alert = TelegramAlert(
                 alert_type=AlertType.OPPORTUNITY,
                 priority=priority,
-                title=f"New Opportunity: {opportunity.token_symbol}",
+                title=f"New Opportunity: {opportunity.token.symbol}",
                 message=message,
-                data={"token_address": opportunity.token_address}
+                data={"token_address": opportunity.token.address}
             )
             
             return await self._send_alert(alert)
@@ -347,6 +345,22 @@ class TelegramNotifier:
         except Exception as e:
             self.logger.error(f"Failed to send system alert: {e}")
             return False
+
+    # Add this method to your TelegramNotifier class in notifications/telegram_notifier.py
+
+    async def cleanup(self) -> None:
+        """Cleanup resources properly."""
+        try:
+            if self.session and not self.session.closed:
+                await self.session.close()
+                self.session = None
+            self.logger.debug("Telegram notifier cleaned up")
+        except Exception as e:
+            self.logger.error(f"Error during Telegram cleanup: {e}")
+
+
+
+
 
     async def send_error_alert(
         self,
@@ -516,34 +530,38 @@ class TelegramNotifier:
 
     def _format_opportunity_message(self, opportunity: TradingOpportunity) -> str:
         """Format trading opportunity message."""
-        symbol = opportunity.token_symbol or "UNKNOWN"
-        score = opportunity.analysis_score or 0
+        symbol = opportunity.token.symbol or "UNKNOWN"
+        score = getattr(opportunity, 'analysis_score', 0) or getattr(opportunity, 'confidence_score', 0) * 100
         
         message = f"**Token:** `{symbol}`\n"
         message += f"**Score:** `{score:.2f}/100`\n"
-        message += f"**Chain:** `{opportunity.chain.upper()}`\n"
         
-        if opportunity.market_cap:
-            message += f"**Market Cap:** `${opportunity.market_cap:,.0f}`\n"
+        # Get chain from metadata
+        chain = "unknown"
+        if hasattr(opportunity, 'metadata') and opportunity.metadata:
+            chain = opportunity.metadata.get('chain', 'unknown')
+        elif hasattr(opportunity, 'chain'):
+            chain = opportunity.chain
+        message += f"**Chain:** `{chain.upper()}`\n"
         
-        if opportunity.liquidity:
-            message += f"**Liquidity:** `${opportunity.liquidity:,.0f}`\n"
-        
-        if opportunity.volume_24h:
-            message += f"**24h Volume:** `${opportunity.volume_24h:,.0f}`\n"
+        if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
+            if hasattr(opportunity.liquidity, 'liquidity_usd'):
+                message += f"**Liquidity:** `${opportunity.liquidity.liquidity_usd:,.0f}`\n"
         
         # Add contract address
-        address = opportunity.token_address
+        address = opportunity.token.address
         if address:
             short_address = f"{address[:6]}...{address[-4:]}"
             message += f"**Contract:** `{short_address}`\n"
         
         # Add analysis highlights
-        if hasattr(opportunity, 'analysis_details') and opportunity.analysis_details:
-            message += "\n**Analysis:**\n"
-            for key, value in opportunity.analysis_details.items():
-                if isinstance(value, (int, float)) and value > 0:
-                    message += f"• {key.replace('_', ' ').title()}: `{value}`\n"
+        if hasattr(opportunity, 'metadata') and opportunity.metadata:
+            analysis_details = opportunity.metadata.get('recommendation', {})
+            if analysis_details:
+                action = analysis_details.get('action', 'MONITOR')
+                confidence = analysis_details.get('confidence', 'MEDIUM')
+                message += f"\n**Recommendation:** `{action}`\n"
+                message += f"**Confidence:** `{confidence}`\n"
         
         return message
 

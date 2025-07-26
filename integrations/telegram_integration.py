@@ -89,10 +89,32 @@ class TelegramIntegration:
             if not self.enabled:
                 return
             
+            # Calculate score from multiple sources
+            score = 0
+            
+            # Try to get score from confidence_score (0-1 range)
+            if hasattr(opportunity, 'confidence_score') and opportunity.confidence_score:
+                score = opportunity.confidence_score * 100
+            
+            # Try to get score from analysis_score
+            elif hasattr(opportunity, 'analysis_score') and opportunity.analysis_score:
+                score = opportunity.analysis_score
+            
+            # Try to get score from metadata
+            elif hasattr(opportunity, 'metadata') and opportunity.metadata:
+                trading_score = opportunity.metadata.get('trading_score', {})
+                if isinstance(trading_score, dict):
+                    score = trading_score.get('overall_score', 0) * 100
+                elif isinstance(trading_score, (int, float)):
+                    score = trading_score * 100
+            
+            # Default fallback
+            if score == 0:
+                score = 50  # Default moderate score
+            
             # Filter based on score threshold
-            score = opportunity.analysis_score or 0
             if score < self.min_score_threshold:
-                self.logger.debug(f"Opportunity {opportunity.token_symbol} below threshold: {score}")
+                self.logger.debug(f"Opportunity {opportunity.token.symbol} below threshold: {score:.1f}")
                 return
             
             # Determine priority based on score
@@ -107,9 +129,9 @@ class TelegramIntegration:
             if success:
                 self.notifications_sent += 1
                 self.last_opportunity_time = datetime.now()
-                self.logger.info(f"📱 Telegram alert sent for {opportunity.token_symbol}")
+                self.logger.info(f"📱 Telegram alert sent for {opportunity.token.symbol} (score: {score:.1f})")
             else:
-                self.logger.warning(f"Failed to send Telegram alert for {opportunity.token_symbol}")
+                self.logger.warning(f"Failed to send Telegram alert for {opportunity.token.symbol}")
                 
         except Exception as e:
             self.logger.error(f"Error handling opportunity notification: {e}")
@@ -126,8 +148,16 @@ class TelegramIntegration:
                 return
             
             # Extract trade information
-            action = trade_data.get('action', 'UNKNOWN')
-            token_symbol = trade_data.get('token_symbol', 'UNKNOWN')
+            action = trade_data.get('action', 'BUY')
+            
+            # Try different ways to get token symbol
+            token_symbol = (
+                trade_data.get('token_symbol') or
+                trade_data.get('symbol') or
+                trade_data.get('position', {}).get('token_symbol') or
+                'UNKNOWN'
+            )
+            
             amount = trade_data.get('amount', 0)
             price = trade_data.get('price', 0)
             
@@ -173,11 +203,17 @@ class TelegramIntegration:
                 return
             
             # Extract position information
-            token_symbol = position_data.get('token_symbol', 'UNKNOWN')
-            entry_price = position_data.get('entry_price', 0)
-            exit_price = position_data.get('exit_price', 0)
-            amount = position_data.get('amount', 0)
-            pnl = position_data.get('pnl', 0)
+            position_info = position_data.get('position', {})
+            token_symbol = (
+                position_info.get('token_symbol') or
+                position_data.get('token_symbol') or
+                'UNKNOWN'
+            )
+            
+            entry_price = position_info.get('entry_price', 0)
+            exit_price = position_info.get('exit_price', 0)
+            amount = position_info.get('amount', 0)
+            pnl = position_info.get('unrealized_pnl', 0)
             reason = position_data.get('exit_reason', 'Manual')
             
             # Calculate performance

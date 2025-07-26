@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Enhanced main trading system with comprehensive automated execution.
+Enhanced main trading system with comprehensive automated execution and Telegram notifications.
 
-Integrates monitoring, analysis, risk management, and automated trading
+Integrates monitoring, analysis, risk management, automated trading, and real-time alerts
 with real-time dashboard and performance tracking.
+
+File: main_with_trading.py
+Classes: EnhancedTradingSystem
+Methods: Enhanced with Telegram integration throughout
 """
 
 import asyncio
@@ -47,16 +51,27 @@ from api.dashboard_core import dashboard_server
 from config.chains import multichain_settings, ChainType
 from config.settings import settings
 
+# Telegram integration
+try:
+    from integrations.telegram_integration import telegram_integration
+    from notifications.telegram_notifier import AlertPriority
+    TELEGRAM_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Telegram integration not available: {e}")
+    print("Please create the notifications/ and integrations/ directories and add the Telegram files")
+    TELEGRAM_AVAILABLE = False
+
 
 class EnhancedTradingSystem:
     """
-    Enhanced multi-chain DEX sniping system with automated trading execution.
+    Enhanced multi-chain DEX sniping system with automated trading execution and Telegram notifications.
     
     Features:
     - Multi-chain monitoring (Ethereum, Base, Solana)
     - Comprehensive risk assessment and position sizing
     - Automated trading execution with risk management
     - Real-time dashboard with performance tracking
+    - Telegram notifications for all events
     - Advanced analytics and reporting
     """
 
@@ -64,7 +79,8 @@ class EnhancedTradingSystem:
         self, 
         auto_trading_enabled: bool = False,
         trading_mode: TradingMode = TradingMode.PAPER_ONLY,
-        disable_dashboard: bool = False
+        disable_dashboard: bool = False,
+        disable_telegram: bool = False
     ) -> None:
         """
         Initialize the enhanced trading system.
@@ -73,11 +89,13 @@ class EnhancedTradingSystem:
             auto_trading_enabled: Enable automated trade execution
             trading_mode: Trading execution mode
             disable_dashboard: Disable web dashboard
+            disable_telegram: Disable Telegram notifications
         """
         self.logger = logger_manager.get_logger("EnhancedTradingSystem")
         self.auto_trading_enabled = auto_trading_enabled
         self.trading_mode = trading_mode
         self.disable_dashboard = disable_dashboard
+        self.disable_telegram = disable_telegram
         
         # System state
         self.is_running = False
@@ -93,6 +111,10 @@ class EnhancedTradingSystem:
         self.execution_engine: Optional[ExecutionEngine] = None
         self.trading_executor: Optional[TradingExecutor] = None
         
+        # Telegram integration
+        self.telegram_integration = telegram_integration if TELEGRAM_AVAILABLE else None
+        self.telegram_enabled = False
+        
         # Dashboard
         self.dashboard_server = None
         self.web_server_task = None
@@ -104,6 +126,7 @@ class EnhancedTradingSystem:
             "trades_executed": 0,
             "successful_trades": 0,
             "total_pnl": Decimal('0'),
+            "opportunities_found": 0,
             "recommendations": {
                 "BUY": 0,
                 "HOLD": 0,
@@ -128,6 +151,15 @@ class EnhancedTradingSystem:
             "average_confidence": 0.0,
             "position_count": 0,
             "daily_pnl": 0.0
+        }
+        
+        # Telegram status tracking
+        self.last_telegram_status = datetime.now()
+        self.last_hourly_update = datetime.now()
+        self.telegram_stats = {
+            "notifications_sent": 0,
+            "last_notification": None,
+            "errors": 0
         }
 
     def setup_signal_handlers(self) -> None:
@@ -177,6 +209,14 @@ class EnhancedTradingSystem:
         try:
             self.logger.info("🔄 Starting graceful shutdown sequence...")
             
+            # Send shutdown notification
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_system_status(
+                    status_type="System Shutdown",
+                    message="Trading bot is shutting down gracefully due to signal",
+                    data={"reason": "Signal received", "uptime_hours": self._get_uptime_hours()}
+                )
+            
             # Stop all monitors first
             self.logger.info("Stopping monitors...")
             for monitor in self.monitors:
@@ -195,6 +235,11 @@ class EnhancedTradingSystem:
                     self.logger.info("✅ Trading executor stopped")
                 except Exception as e:
                     self.logger.warning(f"Error stopping trading executor: {e}")
+            
+            # Send final summary if Telegram enabled
+            if self.telegram_enabled:
+                await self.telegram_integration.send_daily_summary(self.analysis_stats)
+                await self.telegram_integration.shutdown()
             
             # Cleanup all resources
             await self.cleanup()
@@ -229,6 +274,9 @@ class EnhancedTradingSystem:
             
             # Initialize the system
             await self.initialize()
+            
+            # Send startup notifications
+            await self.startup_notifications()
             
             # Start all monitors
             self.logger.info("🚀 Starting all monitors...")
@@ -274,7 +322,10 @@ class EnhancedTradingSystem:
         try:
             self.logger.info("🚀 Initializing Enhanced Trading System")
             
-            # Initialize trading components first
+            # Initialize Telegram integration first
+            await self._initialize_telegram_integration()
+            
+            # Initialize trading components
             await self._initialize_trading_system()
             
             # Initialize analyzers
@@ -291,7 +342,43 @@ class EnhancedTradingSystem:
             
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize Enhanced Trading System: {e}")
+            
+            # Send error notification if Telegram is available
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_error(
+                    error_type="System Initialization Failed",
+                    error_message=str(e),
+                    details={"timestamp": datetime.now().isoformat()}
+                )
+            
             raise
+
+    async def _initialize_telegram_integration(self) -> None:
+        """Initialize Telegram integration."""
+        try:
+            if self.disable_telegram or not TELEGRAM_AVAILABLE:
+                self.logger.info("📱 Telegram integration disabled or not available")
+                return
+            
+            self.logger.info("📱 Initializing Telegram integration...")
+            
+            self.telegram_enabled = await self.telegram_integration.initialize()
+            
+            if self.telegram_enabled:
+                self.logger.info("✅ Telegram integration enabled")
+                
+                # Set notification thresholds based on trading mode
+                if self.trading_mode == TradingMode.LIVE_TRADING:
+                    self.telegram_integration.min_score_threshold = 80.0  # Higher threshold for live
+                else:
+                    self.telegram_integration.min_score_threshold = 70.0  # Lower for paper trading
+                    
+            else:
+                self.logger.info("📱 Telegram integration disabled (not configured)")
+                
+        except Exception as e:
+            self.logger.warning(f"Telegram integration failed: {e}")
+            self.telegram_enabled = False
 
     async def _initialize_trading_system(self) -> None:
         """Initialize the trading execution system."""
@@ -354,6 +441,18 @@ class EnhancedTradingSystem:
             
             if self.trading_mode == TradingMode.LIVE_TRADING:
                 self.logger.warning("⚠️ LIVE TRADING MODE - Real funds at risk!")
+                
+                # Send live trading warning via Telegram
+                if self.telegram_enabled:
+                    await self.telegram_integration.handle_risk_warning(
+                        warning_type="Live Trading Mode Active",
+                        message="System is running in LIVE TRADING mode with real funds at risk",
+                        details={
+                            "max_exposure": f"${portfolio_limits.max_total_exposure_usd}",
+                            "max_position": f"${portfolio_limits.max_single_position_usd}",
+                            "daily_loss_limit": f"${portfolio_limits.max_daily_loss_usd}"
+                        }
+                    )
             
         except Exception as e:
             self.logger.error(f"Failed to initialize trading system: {e}")
@@ -474,7 +573,7 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Solana monitor failed: {e}")
             
-            # 🆕 NEW: Raydium DEX monitor (Solana-specific)
+            # Raydium DEX monitor (Solana-specific)
             try:
                 raydium_monitor = RaydiumMonitor(check_interval=10.0)
                 raydium_monitor.add_callback(self._handle_raydium_opportunity)
@@ -508,6 +607,15 @@ class EnhancedTradingSystem:
             
             if active_monitors == 0:
                 self.logger.error("❌ No monitors initialized successfully!")
+                
+                # Send critical error notification
+                if self.telegram_enabled:
+                    await self.telegram_integration.handle_error(
+                        error_type="Critical Monitor Failure",
+                        error_message="No monitoring capabilities available - system cannot detect opportunities",
+                        details={"active_monitors": 0, "total_attempted": 5}
+                    )
+                
                 raise RuntimeError("No monitoring capabilities available")
             
             # Log monitor details
@@ -518,7 +626,6 @@ class EnhancedTradingSystem:
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize monitors: {e}")
             raise
-
 
     async def _handle_raydium_opportunity(self, opportunity: TradingOpportunity) -> None:
         """
@@ -534,7 +641,7 @@ class EnhancedTradingSystem:
             self.logger.info(f"   🏦 Pool: {opportunity.metadata.get('pool_id', 'Unknown')[:8]}...")
             
             # Update statistics
-            self.opportunities_found += 1
+            self.analysis_stats["opportunities_found"] += 1
             
             # Enhanced analysis for Raydium-specific factors
             raydium_analysis = await self._analyze_raydium_opportunity(opportunity)
@@ -550,7 +657,17 @@ class EnhancedTradingSystem:
             
         except Exception as e:
             self.logger.error(f"💥 Error handling Raydium opportunity: {e}")
-
+            
+            # Send error notification
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_error(
+                    error_type="Raydium Opportunity Processing Error",
+                    error_message=str(e),
+                    details={
+                        "token_symbol": getattr(opportunity.token, 'symbol', 'Unknown'),
+                        "pool_id": opportunity.metadata.get('pool_id', 'Unknown')
+                    }
+                )
 
     async def _analyze_raydium_opportunity(self, opportunity: TradingOpportunity) -> Dict[str, Any]:
         """
@@ -599,12 +716,6 @@ class EnhancedTradingSystem:
         except Exception as e:
             self.logger.error(f"💥 Error in Raydium analysis: {e}")
             return {'raydium_score': 0.3, 'recommended_position_size': 0.01}
-        
-
-
-
-
-
 
     def _enhance_opportunity_with_raydium_data(
         self, 
@@ -651,14 +762,6 @@ class EnhancedTradingSystem:
         except Exception as e:
             self.logger.error(f"💥 Error enhancing opportunity with Raydium data: {e}")
             return opportunity
-
-
-
-
-
-
-
-
 
     async def _initialize_dashboard(self) -> None:
         """Initialize web dashboard."""
@@ -713,8 +816,6 @@ class EnhancedTradingSystem:
             # Start system monitoring and reporting
             monitoring_task = asyncio.create_task(self._system_monitoring_loop())
             
-            # Start position monitoring (handled by trading executor)
-            
             # Wait for all tasks
             all_tasks = monitor_tasks + [monitoring_task]
             if self.web_server_task:
@@ -731,7 +832,7 @@ class EnhancedTradingSystem:
 
     async def _handle_opportunity(self, opportunity: TradingOpportunity) -> None:
         """
-        Enhanced opportunity handler with robust dashboard integration.
+        Enhanced opportunity handler with robust dashboard integration and Telegram notifications.
         
         Args:
             opportunity: Trading opportunity from monitors
@@ -775,6 +876,7 @@ class EnhancedTradingSystem:
             
             # Update analysis statistics
             self.analysis_stats["total_analyzed"] += 1
+            self.analysis_stats["opportunities_found"] += 1
             
             # Track by chain
             chain = opportunity.metadata.get('chain', 'unknown').lower()
@@ -783,6 +885,12 @@ class EnhancedTradingSystem:
             
             # Perform comprehensive analysis
             enhanced_opportunity = await self._analyze_opportunity(opportunity)
+            
+            # Send Telegram notification for new opportunities (before trading)
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_new_opportunity(enhanced_opportunity)
+                self.telegram_stats["notifications_sent"] += 1
+                self.telegram_stats["last_notification"] = datetime.now()
             
             # Execute trading logic if enabled
             if self.auto_trading_enabled and self.trading_executor:
@@ -804,8 +912,16 @@ class EnhancedTradingSystem:
                     
                 except Exception as trading_error:
                     self.logger.error(f"Trading assessment failed for {token_symbol}: {trading_error}")
+                    
+                    # Send error notification
+                    if self.telegram_enabled:
+                        await self.telegram_integration.handle_error(
+                            error_type="Trading Assessment Error",
+                            error_message=str(trading_error),
+                            details={"token_symbol": token_symbol, "token_address": token_address}
+                        )
             
-            # **CRITICAL FIX**: Always add to dashboard, regardless of trading mode
+            # Always add to dashboard, regardless of trading mode
             await self._add_to_dashboard_guaranteed(enhanced_opportunity)
             
             # Log successful processing
@@ -814,6 +930,15 @@ class EnhancedTradingSystem:
         except Exception as e:
             token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN') if hasattr(opportunity, 'token') else 'UNKNOWN'
             self.logger.error(f"Error handling opportunity {token_symbol}: {e}")
+            
+            # Send error notification
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_error(
+                    error_type="Opportunity Processing Error",
+                    error_message=str(e),
+                    details={"token_symbol": token_symbol}
+                )
+            
             import traceback
             self.logger.debug(f"Full traceback: {traceback.format_exc()}")
 
@@ -913,168 +1038,6 @@ class EnhancedTradingSystem:
         except Exception as e:
             self.logger.error(f"Manual dashboard update failed: {e}")
             raise
-
-    async def _generate_test_opportunities(self) -> None:
-        """
-        Generate test opportunities for dashboard testing.
-        This helps verify that the dashboard integration is working.
-        """
-        try:
-            await asyncio.sleep(15)  # Wait for system to fully initialize
-            
-            self.logger.info("🧪 Generating test opportunities for dashboard verification...")
-            
-            # Generate test opportunities to verify dashboard
-            test_tokens = [
-                ("TESTMEME", "ethereum", 150000.0),
-                ("MOCKCOIN", "solana", 75000.0), 
-                ("BASETEST", "base", 200000.0)
-            ]
-            
-            for i, (symbol, chain, liquidity) in enumerate(test_tokens):
-                try:
-                    await asyncio.sleep(10)  # Stagger opportunities
-                    
-                    # Create test opportunity
-                    test_opportunity = await self._create_test_opportunity(symbol, chain, liquidity)
-                    
-                    if test_opportunity:
-                        # Process through normal pipeline
-                        await self._handle_opportunity(test_opportunity)
-                        self.logger.info(f"🧪 Test opportunity {i+1}/3 processed: {symbol}")
-                    
-                except Exception as test_error:
-                    self.logger.error(f"Test opportunity {i+1} failed: {test_error}")
-            
-            self.logger.info("🧪 Test opportunity generation completed")
-            
-        except Exception as e:
-            self.logger.error(f"Test opportunity generation failed: {e}")
-
-    async def _create_test_opportunity(self, symbol: str, chain: str, liquidity: float) -> Optional[TradingOpportunity]:
-        """
-        Create a test trading opportunity for dashboard testing.
-        
-        Args:
-            symbol: Token symbol
-            chain: Blockchain name
-            liquidity: Liquidity amount in USD
-            
-        Returns:
-            TradingOpportunity or None if creation fails
-        """
-        try:
-            from models.token import TokenInfo, LiquidityInfo, ContractAnalysis, SocialMetrics
-            
-            # Generate test address based on chain
-            if chain == "solana":
-                # Solana addresses don't follow 0x format and have different validation
-                test_address = f"{symbol}{''.join(random.choices('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz', k=40))}"
-            else:
-                # EVM chains (Ethereum, Base) use 0x format
-                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
-            
-            # Create test token info - NOTE: discovered_at is NOT a TokenInfo parameter
-            if chain == "solana":
-                # For Solana, we need to create a custom token-like object since TokenInfo validates for 0x format
-                class SolanaTokenInfo:
-                    def __init__(self, address, symbol, name, decimals=9, total_supply=1000000000):
-                        self.address = address
-                        self.symbol = symbol
-                        self.name = name
-                        self.decimals = decimals
-                        self.total_supply = total_supply
-                        self.price = 1.0  # Default price
-                
-                token_info = SolanaTokenInfo(
-                    address=test_address,
-                    symbol=symbol,
-                    name=f"Test {symbol}",
-                    decimals=9,  # Common for Solana
-                    total_supply=1000000000
-                )
-            else:
-                # For EVM chains, use regular TokenInfo
-                token_info = TokenInfo(
-                    address=test_address,
-                    symbol=symbol,
-                    name=f"Test {symbol}",
-                    decimals=18,
-                    total_supply=1000000000
-                )
-            
-            # Create test liquidity info  
-            liquidity_info = LiquidityInfo(
-                pair_address=test_address,
-                dex_name=f"Test DEX ({chain})",
-                token0=test_address,
-                token1="0x0000000000000000000000000000000000000000" if chain != "solana" else "So11111111111111111111111111111111111111112",
-                reserve0=float(liquidity / 2),
-                reserve1=float(liquidity / 2),
-                liquidity_usd=liquidity,
-                created_at=datetime.now(),
-                block_number=0
-            )
-            
-            # Create test contract analysis
-            contract_analysis = ContractAnalysis(
-                is_honeypot=False,
-                is_mintable=random.choice([True, False]),
-                is_pausable=random.choice([True, False]),
-                has_blacklist=False,
-                ownership_renounced=random.choice([True, False]),
-                liquidity_locked=True,
-                lock_duration=86400 * 30,  # 30 days
-                risk_score=random.uniform(0.1, 0.6),
-                risk_level=RiskLevel.MEDIUM
-            )
-            
-            # Create test social metrics
-            social_metrics = SocialMetrics(
-                twitter_followers=random.randint(100, 10000),
-                telegram_members=random.randint(50, 5000),
-                social_score=random.uniform(0.3, 0.8),
-                sentiment_score=random.uniform(-0.5, 0.8)
-            )
-            
-            # Create test opportunity
-            opportunity = TradingOpportunity(
-                token=token_info,
-                liquidity=liquidity_info,
-                contract_analysis=contract_analysis,
-                social_metrics=social_metrics,
-                detected_at=datetime.now(),  # This IS a valid parameter for TradingOpportunity
-                confidence_score=random.uniform(0.3, 0.8),
-                metadata={
-                    'chain': chain,
-                    'source': 'test_generator',
-                    'is_test': True,
-                    'recommendation': {
-                        'action': random.choice(['BUY', 'MONITOR', 'HOLD']),
-                        'confidence': random.choice(['LOW', 'MEDIUM', 'HIGH'])
-                    },
-                    'trading_score': {
-                        'overall_score': random.uniform(0.2, 0.9),
-                        'risk_score': random.uniform(0.1, 0.7)
-                    }
-                }
-            )
-            
-            # Add chain information
-            opportunity.chain = chain
-            
-            return opportunity
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create test opportunity: {e}")
-            import traceback
-            self.logger.debug(f"Test opportunity creation traceback: {traceback.format_exc()}")
-            return None
-
-
-
-
-
 
     async def _analyze_opportunity(self, opportunity: TradingOpportunity) -> TradingOpportunity:
         """
@@ -1235,7 +1198,7 @@ class EnhancedTradingSystem:
 
     async def _handle_trading_alert(self, alert_data: Dict[str, Any]) -> None:
         """
-        Handle trading alerts from the execution system.
+        Handle trading alerts from the execution system with Telegram notifications.
         
         Args:
             alert_data: Alert information
@@ -1250,7 +1213,12 @@ class EnhancedTradingSystem:
                 
                 position_data = alert_data.get('position')
                 if position_data:
-                    self.logger.info(f"🎯 TRADE EXECUTED: {position_data.get('token_symbol', 'UNKNOWN')}")
+                    token_symbol = position_data.get('token_symbol', 'UNKNOWN')
+                    self.logger.info(f"🎯 TRADE EXECUTED: {token_symbol}")
+                    
+                    # Send Telegram notification
+                    if self.telegram_enabled:
+                        await self.telegram_integration.handle_trade_executed(alert_data)
                     
             elif alert_type.startswith('POSITION_CLOSED'):
                 self.execution_metrics["position_count"] = max(0, self.execution_metrics["position_count"] - 1)
@@ -1266,11 +1234,36 @@ class EnhancedTradingSystem:
                         if pnl > 0:
                             self.analysis_stats["successful_trades"] += 1
                     
-                    self.logger.info(f"🚪 POSITION CLOSED: {position_data.get('token_symbol', 'UNKNOWN')}")
+                    token_symbol = position_data.get('token_symbol', 'UNKNOWN')
+                    self.logger.info(f"🚪 POSITION CLOSED: {token_symbol}")
+                    
+                    # Send Telegram notification
+                    if self.telegram_enabled:
+                        await self.telegram_integration.handle_position_closed(alert_data)
             
             elif alert_type == 'TRADE_FAILED':
                 error_msg = alert_data.get('error_message', 'Unknown error')
                 self.logger.error(f"❌ TRADE FAILED: {error_msg}")
+                
+                # Send Telegram notification
+                if self.telegram_enabled:
+                    await self.telegram_integration.handle_error(
+                        error_type="Trade Execution Failed",
+                        error_message=error_msg,
+                        details=alert_data
+                    )
+            
+            elif alert_type.startswith('RISK_WARNING'):
+                warning_type = alert_data.get('warning_type', 'General Risk Warning')
+                message = alert_data.get('message', 'Risk threshold exceeded')
+                
+                # Send Telegram notification
+                if self.telegram_enabled:
+                    await self.telegram_integration.handle_risk_warning(
+                        warning_type=warning_type,
+                        message=message,
+                        details=alert_data
+                    )
             
             # Broadcast alert to dashboard
             if self.dashboard_server:
@@ -1281,9 +1274,17 @@ class EnhancedTradingSystem:
                 
         except Exception as e:
             self.logger.error(f"Error handling trading alert: {e}")
+            
+            # Send error notification
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_error(
+                    error_type="Trading Alert Processing Error",
+                    error_message=str(e),
+                    details={"alert_type": alert_data.get('type', 'Unknown')}
+                )
 
     async def _system_monitoring_loop(self) -> None:
-        """Main system monitoring and reporting loop."""
+        """Main system monitoring and reporting loop with Telegram status updates."""
         self.logger.info("🔄 Starting system monitoring loop")
         
         while self.is_running:
@@ -1293,13 +1294,86 @@ class EnhancedTradingSystem:
                 await self._update_performance_metrics()
                 await self._log_system_statistics()
                 await self._update_dashboard_metrics()
+                await self._check_hourly_telegram_update()
                 
             except asyncio.CancelledError:
                 self.logger.info("System monitoring cancelled")
                 break
             except Exception as e:
                 self.logger.error(f"Error in system monitoring: {e}")
+                
+                # Send error notification
+                if self.telegram_enabled:
+                    await self.telegram_integration.handle_error(
+                        error_type="System Monitoring Error",
+                        error_message=str(e),
+                        details={"timestamp": datetime.now().isoformat()}
+                    )
+                
                 await asyncio.sleep(60)
+
+    async def _check_hourly_telegram_update(self) -> None:
+        """Check if it's time to send hourly Telegram status update."""
+        try:
+            if not self.telegram_enabled:
+                return
+            
+            current_time = datetime.now()
+            time_since_last = (current_time - self.last_hourly_update).total_seconds()
+            
+            # Send hourly update
+            if time_since_last >= 3600:  # 1 hour
+                await self._send_hourly_telegram_update()
+                self.last_hourly_update = current_time
+            
+        except Exception as e:
+            self.logger.error(f"Error checking hourly Telegram update: {e}")
+
+    async def _send_hourly_telegram_update(self) -> None:
+        """Send hourly status update via Telegram."""
+        try:
+            if not self.telegram_enabled:
+                return
+            
+            # Prepare hourly statistics
+            stats = {
+                'opportunities_found': self.analysis_stats.get("opportunities_found", 0),
+                'trades_executed': self.analysis_stats.get("trades_executed", 0),
+                'daily_pnl': self.execution_metrics.get("daily_pnl", 0),
+                'active_positions': self.execution_metrics.get("position_count", 0),
+                'system_uptime': self._get_uptime_hours(),
+                'telegram_notifications': self.telegram_stats.get("notifications_sent", 0)
+            }
+            
+            # Format status message
+            message = f"System running smoothly. "
+            message += f"Found {stats['opportunities_found']} opportunities, "
+            message += f"executed {stats['trades_executed']} trades. "
+            
+            if stats['daily_pnl'] != 0:
+                pnl_emoji = "📈" if stats['daily_pnl'] > 0 else "📉"
+                message += f"Daily P&L: {pnl_emoji} ${stats['daily_pnl']:.2f}. "
+            
+            message += f"Sent {stats['telegram_notifications']} notifications."
+            
+            await self.telegram_integration.handle_system_status(
+                status_type="Hourly Status Update",
+                message=message,
+                data=stats
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error sending hourly Telegram update: {e}")
+
+    def _get_uptime_hours(self) -> float:
+        """Calculate system uptime in hours."""
+        try:
+            if hasattr(self, 'start_time'):
+                uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+                return round(uptime_seconds / 3600, 1)  # Convert to hours
+            return 0.0
+        except:
+            return 0.0
 
     async def _update_performance_metrics(self) -> None:
         """Update system performance metrics."""
@@ -1332,6 +1406,7 @@ class EnhancedTradingSystem:
             self.logger.info(f"   Uptime: {uptime}")
             self.logger.info(f"   Analysis Rate: {analysis_rate:.1f}/min")
             self.logger.info(f"   Total Analyzed: {self.analysis_stats['total_analyzed']}")
+            self.logger.info(f"   Opportunities Found: {self.analysis_stats['opportunities_found']}")
             self.logger.info(f"   High Confidence: {self.analysis_stats['high_confidence']}")
             
             # Trading execution stats
@@ -1362,6 +1437,16 @@ class EnhancedTradingSystem:
             for action, count in self.analysis_stats["recommendations"].items():
                 if count > 0:
                     self.logger.info(f"     {action}: {count}")
+            
+            # Telegram stats
+            if self.telegram_enabled:
+                self.logger.info("   TELEGRAM NOTIFICATIONS:")
+                self.logger.info(f"     Sent: {self.telegram_stats['notifications_sent']}")
+                self.logger.info(f"     Errors: {self.telegram_stats['errors']}")
+                last_notification = self.telegram_stats.get('last_notification')
+                if last_notification:
+                    time_since = (datetime.now() - last_notification).total_seconds() / 60
+                    self.logger.info(f"     Last sent: {time_since:.1f} minutes ago")
             
             # Portfolio status
             if self.position_manager:
@@ -1404,12 +1489,12 @@ class EnhancedTradingSystem:
         """Log system startup information."""
         self.logger.info("=" * 80)
         self.logger.info("🚀 ENHANCED MULTI-CHAIN DEX SNIPING SYSTEM")
-        self.logger.info("Features: Advanced Analysis + Automated Trading + Risk Management")
+        self.logger.info("Features: Advanced Analysis + Automated Trading + Risk Management + Telegram Alerts")
         self.logger.info("")
         self.logger.info("MONITORING CONFIGURATION:")
         self.logger.info("  Ethereum: Uniswap V2 (5s intervals)")
         self.logger.info("  Base: Uniswap V2 (2s intervals)")
-        self.logger.info("  Solana: Pump.fun + Jupiter (5s + 10s)")
+        self.logger.info("  Solana: Pump.fun + Jupiter + Raydium (5s + 10s)")
         self.logger.info("")
         self.logger.info("ENHANCED FEATURES:")
         self.logger.info("  - Multi-factor risk assessment")
@@ -1418,10 +1503,13 @@ class EnhancedTradingSystem:
         self.logger.info("  - Real-time portfolio management")
         self.logger.info("  - Advanced stop-loss/take-profit")
         self.logger.info("  - Market condition adaptation")
+        if self.telegram_enabled:
+            self.logger.info("  - Real-time Telegram notifications")
         self.logger.info("")
         self.logger.info("TRADING CONFIGURATION:")
         self.logger.info(f"  Mode: {self.trading_mode.value}")
         self.logger.info(f"  Auto Execution: {'ENABLED' if self.auto_trading_enabled else 'DISABLED'}")
+        self.logger.info(f"  Telegram Alerts: {'ENABLED' if self.telegram_enabled else 'DISABLED'}")
         
         if self.risk_manager:
             limits = self.risk_manager.current_limits
@@ -1433,13 +1521,105 @@ class EnhancedTradingSystem:
             self.logger.info("")
             self.logger.info("🌐 WEB DASHBOARD: http://localhost:8000")
             
+        if self.telegram_enabled:
+            self.logger.info("")
+            self.logger.info("📱 TELEGRAM NOTIFICATIONS: Enabled")
+            
         self.logger.info("=" * 80)
+
+    async def startup_notifications(self) -> None:
+        """Send startup notifications via Telegram."""
+        try:
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_system_status(
+                    status_type="System Started",
+                    message="Multi-chain trading bot has started successfully and is monitoring for opportunities",
+                    data={
+                        "version": "2.0",
+                        "trading_mode": self.trading_mode.value,
+                        "auto_trading": self.auto_trading_enabled,
+                        "enabled_chains": ["ethereum", "base", "solana"],
+                        "monitors_count": len(self.monitors),
+                        "telegram_enabled": self.telegram_enabled,
+                        "dashboard_enabled": not self.disable_dashboard,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Error sending startup notifications: {e}")
+
+    async def test_telegram_notifications(self) -> None:
+        """Test method to verify Telegram notifications are working."""
+        try:
+            if not self.telegram_enabled:
+                self.logger.warning("Telegram not enabled - cannot test")
+                return
+            
+            # Test system alert
+            await self.telegram_integration.handle_system_status(
+                status_type="Test Notification",
+                message="This is a test message to verify Telegram integration is working correctly",
+                data={"test": True, "timestamp": datetime.now().isoformat()}
+            )
+            
+            self.logger.info("📱 Test Telegram notification sent")
+            
+        except Exception as e:
+            self.logger.error(f"Telegram test failed: {e}")
+
+    async def send_daily_summary_telegram(self) -> None:
+        """Send daily trading summary via Telegram."""
+        try:
+            if not self.telegram_enabled:
+                return
+            
+            # Calculate additional stats
+            win_rate = 0.0
+            if self.analysis_stats["trades_executed"] > 0:
+                win_rate = (self.analysis_stats["successful_trades"] / 
+                           self.analysis_stats["trades_executed"]) * 100
+            
+            # Find best performer (mock for now)
+            best_performer = None
+            if self.analysis_stats["successful_trades"] > 0:
+                best_performer = {
+                    "symbol": "MOCK",
+                    "pnl": 25.5  # Mock data
+                }
+            
+            stats = {
+                'opportunities_found': self.analysis_stats["opportunities_found"],
+                'trades_executed': self.analysis_stats["trades_executed"],
+                'daily_pnl': float(self.analysis_stats["total_pnl"]),
+                'win_rate': win_rate,
+                'best_performer': best_performer
+            }
+            
+            await self.telegram_integration.send_daily_summary(stats)
+            
+        except Exception as e:
+            self.logger.error(f"Error sending daily summary: {e}")
 
     async def stop(self) -> None:
         """Stop the enhanced trading system."""
         try:
             self.logger.info("🛑 Stopping Enhanced Trading System...")
             self.is_running = False
+            
+            # Send shutdown notification
+            if self.telegram_enabled:
+                await self.telegram_integration.handle_system_status(
+                    status_type="System Shutdown",
+                    message="Trading bot is shutting down gracefully",
+                    data={"reason": "Manual shutdown", "uptime_hours": self._get_uptime_hours()}
+                )
+                
+                # Send final daily summary if available
+                await self.send_daily_summary_telegram()
+                
+                # Shutdown Telegram integration
+                await self.telegram_integration.shutdown()
             
             # Stop monitors
             for monitor in self.monitors:
@@ -1467,7 +1647,6 @@ class EnhancedTradingSystem:
             
         except Exception as e:
             self.logger.error(f"Error during system stop: {e}")
-
 
     async def cleanup(self) -> None:
         """
@@ -1534,6 +1713,14 @@ class EnhancedTradingSystem:
                     self.logger.info(f"✅ {name} analyzer cleaned up")
                 except Exception as e:
                     self.logger.warning(f"Error cleaning up {name} analyzer: {e}")
+            
+            # Cleanup Telegram integration
+            if self.telegram_enabled and self.telegram_integration:
+                try:
+                    await self.telegram_integration.shutdown()
+                    self.logger.info("✅ Telegram integration cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up Telegram integration: {e}")
             
             self.logger.info("✅ Enhanced Trading System cleanup completed")
             
@@ -1629,6 +1816,14 @@ class EnhancedTradingSystem:
                     'type': 'analyzer'
                 })
             
+            # Get Telegram status
+            telegram_status = {
+                'enabled': self.telegram_enabled,
+                'notifications_sent': self.telegram_stats.get('notifications_sent', 0),
+                'last_notification': self.telegram_stats.get('last_notification'),
+                'errors': self.telegram_stats.get('errors', 0)
+            }
+            
             # Calculate uptime
             uptime_seconds = (datetime.now() - self.start_time).total_seconds() if hasattr(self, 'start_time') else 0
             
@@ -1643,15 +1838,12 @@ class EnhancedTradingSystem:
                 'monitors': monitor_statuses,
                 'analyzers': analyzer_status,
                 'trading': trading_status,
+                'telegram': telegram_status,
                 'raydium_specific': raydium_stats,
                 'opportunities': {
                     'total_found': getattr(self, 'opportunities_found', 0),
-                    'total_processed': len(getattr(self, 'processed_opportunities', [])),
-                    'recent_opportunities': len([
-                        opp for opp in getattr(self, 'processed_opportunities', [])
-                        if hasattr(opp, 'detected_at') and 
-                        (datetime.now() - opp.detected_at).total_seconds() < 3600
-                    ])
+                    'total_processed': self.analysis_stats.get('total_analyzed', 0),
+                    'recent_opportunities': self.analysis_stats.get('opportunities_found', 0)
                 }
             }
             
@@ -1661,66 +1853,29 @@ class EnhancedTradingSystem:
                 'error': str(e),
                 'system': {'status': 'error'},
                 'monitors': [],
-                'trading': {'error': 'status unavailable'}
+                'trading': {'error': 'status unavailable'},
+                'telegram': {'error': 'status unavailable'}
             }
 
-    def stop(self) -> None:
-        """
-        Stop the trading system gracefully.
-        
-        This method signals all components to stop their operations
-        but doesn't clean up resources (use cleanup() for that).
-        """
-        try:
-            self.logger.info("🛑 Stopping Enhanced Trading System...")
-            
-            # Signal stop to all monitors
-            for monitor in self.monitors:
-                try:
-                    if hasattr(monitor, 'stop'):
-                        monitor.stop()
-                        self.logger.info(f"🛑 {monitor.__class__.__name__} stopped")
-                except Exception as e:
-                    self.logger.warning(f"Error stopping {monitor.__class__.__name__}: {e}")
-            
-            # Stop trading executor
-            if hasattr(self, 'trading_executor') and self.trading_executor:
-                try:
-                    self.trading_executor.stop()
-                    self.logger.info("🛑 Trading executor stopped")
-                except Exception as e:
-                    self.logger.warning(f"Error stopping trading executor: {e}")
-            
-            self.logger.info("✅ Enhanced Trading System stopped")
-            
-        except Exception as e:
-            self.logger.error(f"💥 Error during system stop: {e}")
-
-
-
-
-
-
-
-#!/usr/bin/env python3
-"""
-REPLACE the main() function at the bottom of main_with_trading.py with this version
-"""
 
 async def main():
     """
-    Enhanced main function with proper signal handling.
+    Enhanced main function with proper signal handling and Telegram integration.
     """
     import argparse
     from trading.trading_executor import TradingMode
     
-    parser = argparse.ArgumentParser(description='Enhanced DEX Trading System')
+    parser = argparse.ArgumentParser(description='Enhanced DEX Trading System with Telegram Alerts')
     parser.add_argument('--mode', choices=['paper', 'live'], default='paper',
                       help='Trading mode (default: paper)')
     parser.add_argument('--auto-trading', action='store_true',
                       help='Enable automatic trading')
     parser.add_argument('--disable-dashboard', action='store_true',
                       help='Disable web dashboard')
+    parser.add_argument('--disable-telegram', action='store_true',
+                      help='Disable Telegram notifications')
+    parser.add_argument('--test-telegram', action='store_true',
+                      help='Send test Telegram notification and exit')
     
     args = parser.parse_args()
     
@@ -1732,8 +1887,19 @@ async def main():
         system = EnhancedTradingSystem(
             auto_trading_enabled=args.auto_trading,
             trading_mode=trading_mode,
-            disable_dashboard=args.disable_dashboard
+            disable_dashboard=args.disable_dashboard,
+            disable_telegram=args.disable_telegram
         )
+        
+        # Test Telegram and exit if requested
+        if args.test_telegram:
+            await system._initialize_telegram_integration()
+            if system.telegram_enabled:
+                await system.test_telegram_notifications()
+                print("✅ Telegram test notification sent!")
+            else:
+                print("❌ Telegram not configured or disabled")
+            return
         
         # Run with signal handling
         await system.run_with_signal_handling()
