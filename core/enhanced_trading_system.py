@@ -7,7 +7,7 @@ File: core/enhanced_trading_system.py
 Class: EnhancedTradingSystem
 Methods: Core system management and initialization
 
-UPDATE: Added missing _initialize_telegram_integration method for backward compatibility
+FIXED: Corrected imports and model usage, added port conflict handling
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from decimal import Decimal
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.logger import logger_manager
-from models.token import TradingOpportunity, RiskLevel
+from models.token import TradingOpportunity, TokenInfo, LiquidityInfo, ContractAnalysis, SocialMetrics, RiskLevel
 
 # Core monitoring and analysis
 from monitors.new_token_monitor import NewTokenMonitor
@@ -188,6 +188,7 @@ class EnhancedTradingSystem:
         # Dashboard components
         self.dashboard_uvicorn_server = None
         self.dashboard_task = None
+        self.dashboard_port = None
 
     async def initialize(self) -> None:
         """
@@ -468,17 +469,11 @@ class EnhancedTradingSystem:
                 self.opportunity_handler.handle_opportunity
             )
 
-    # Fix 1: Update the dashboard server to handle port conflicts
-    # Add this to core/enhanced_trading_system.py in the _initialize_dashboard method
-
     async def _initialize_dashboard(self) -> None:
         """
         Initialize the web dashboard with port conflict handling.
         
         Sets up the web server and dashboard components for real-time monitoring.
-        
-        Raises:
-            Exception: If dashboard initialization fails
         """
         try:
             self.logger.info("🔧 Initializing dashboard...")
@@ -555,190 +550,6 @@ class EnhancedTradingSystem:
             # Don't raise - continue without dashboard
             self.dashboard_uvicorn_server = None
             self.dashboard_task = None
-
-
-    async def _create_realistic_test_opportunity(self) -> Optional[TradingOpportunity]:
-        """
-        Create a realistic test opportunity with varied data and proper address validation.
-        
-        Returns:
-            Optional[TradingOpportunity]: Test opportunity or None if creation failed
-        """
-        try:
-            # Define realistic test tokens
-            test_tokens = [
-                ("DOGE2", "DogeClassic", "ethereum"),
-                ("PEPE", "PepeCoin", "ethereum"), 
-                ("FLOKI", "Floki", "base"),
-                ("SHIB2", "ShibaInu2", "base"),
-                ("WIF", "dogwifhat", "solana"),
-                ("BONK2", "Bonk2", "solana"),
-                ("MEME", "MemeCoin", "ethereum"),
-                ("CHAD", "ChadCoin", "base"),
-                ("MOON", "MoonToken", "solana"),
-                ("ROCKET", "RocketCoin", "ethereum"),
-                ("DIAMOND", "DiamondHands", "base"),
-                ("HODL", "HodlToken", "solana"),
-                ("LAMBO", "LamboCoin", "ethereum"),
-                ("APE2", "ApeToken2", "base"),
-                ("CATS", "CatsCoin", "solana")
-            ]
-            
-            # Select random token
-            symbol, name, chain = random.choice(test_tokens)
-            
-            # Generate realistic addresses based on chain with proper validation
-            if chain == "solana":
-                # For Solana, create a proper mock address that passes validation
-                # Solana addresses are typically 32-44 chars, but our validation expects Ethereum format
-                # So we'll create Ethereum-style addresses for Solana tokens for testing
-                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
-            else:
-                # Ethereum/Base addresses (standard format)
-                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
-            
-            # Validate the address format before proceeding
-            if not test_address or len(test_address) != 42 or not test_address.startswith('0x'):
-                self.logger.warning(f"Generated invalid address format: {test_address}")
-                # Fallback to a known good format
-                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
-            
-            # Create token info with address validation
-            try:
-                token_info = TokenInfo(
-                    address=test_address,
-                    symbol=symbol,
-                    name=name,
-                    decimals=18,
-                    total_supply=random.randint(100_000_000, 10_000_000_000)
-                )
-            except ValueError as e:
-                self.logger.error(f"Failed to create TokenInfo with address {test_address}: {e}")
-                return None
-            
-            # Generate realistic liquidity
-            liquidity_usd = random.uniform(1000, 500000)
-            
-            # Create liquidity info
-            dex_names = {
-                "ethereum": ["Uniswap V2", "Uniswap V3", "SushiSwap"],
-                "base": ["BaseSwap", "Uniswap V3", "PancakeSwap"],
-                "solana": ["Raydium", "Orca", "Jupiter"]
-            }
-            
-            liquidity_info = LiquidityInfo(
-                pair_address=test_address,
-                dex_name=random.choice(dex_names[chain]),
-                token0=test_address,
-                token1="0x0000000000000000000000000000000000000000" if chain != "solana" else "0x" + "1" * 40,  # Use valid format for Solana too
-                reserve0=float(liquidity_usd / 2),
-                reserve1=float(liquidity_usd / 2),
-                liquidity_usd=liquidity_usd,
-                created_at=datetime.now() - timedelta(minutes=random.randint(1, 60)),
-                block_number=random.randint(18000000, 19000000)
-            )
-            
-            # Create contract analysis
-            contract_analysis = ContractAnalysis(
-                is_honeypot=random.choice([True, False]),
-                is_mintable=random.choice([True, False]),
-                is_pausable=random.choice([True, False]),
-                has_blacklist=random.choice([True, False]),
-                ownership_renounced=random.choice([True, False]),
-                liquidity_locked=random.choice([True, False]),
-                lock_duration=random.randint(30, 365) * 24 * 3600 if random.choice([True, False]) else None,
-                risk_score=random.uniform(0.1, 0.9),
-                risk_level=random.choice(list(RiskLevel)),
-                analysis_notes=[
-                    random.choice([
-                        "Standard ERC-20 contract",
-                        "Custom token with additional features",
-                        "Fork of popular token contract",
-                        "Verified contract on blockchain explorer",
-                        "High transaction volume detected"
-                    ])
-                ]
-            )
-            
-            # Create social metrics
-            social_metrics = SocialMetrics(
-                twitter_followers=random.randint(100, 50000) if random.choice([True, False]) else None,
-                telegram_members=random.randint(50, 10000) if random.choice([True, False]) else None,
-                discord_members=random.randint(20, 5000) if random.choice([True, False]) else None,
-                reddit_subscribers=random.randint(10, 2000) if random.choice([True, False]) else None,
-                website_url=f"https://{symbol.lower()}.com" if random.choice([True, False]) else None,
-                social_score=random.uniform(0.1, 1.0),
-                sentiment_score=random.uniform(-0.5, 0.8)
-            )
-            
-            # Create realistic metadata
-            confidence_levels = ['LOW', 'MEDIUM', 'HIGH']
-            actions = ['BUY', 'MONITOR', 'HOLD', 'AVOID']
-            risk_levels = ['low', 'medium', 'high', 'critical']
-            
-            metadata = {
-                'chain': chain,
-                'source': 'test_generator',
-                'is_test': True,
-                'recommendation': {
-                    'action': random.choice(actions),
-                    'confidence': random.choice(confidence_levels),
-                    'reasoning': random.choice([
-                        'Strong social metrics and community',
-                        'High liquidity and trading volume',
-                        'Verified contract with good tokenomics',
-                        'Trending on social media platforms',
-                        'Low risk score with locked liquidity',
-                        'Active development team'
-                    ])
-                },
-                'trading_score': {
-                    'overall_score': random.uniform(0.2, 0.95),
-                    'risk_score': random.uniform(0.1, 0.8),
-                    'liquidity_score': random.uniform(0.3, 1.0),
-                    'volatility_score': random.uniform(0.1, 0.9),
-                    'social_score': social_metrics.social_score,
-                    'technical_score': random.uniform(0.2, 0.8)
-                },
-                'risk_level': random.choice(risk_levels),
-                'analysis_timestamp': datetime.now().isoformat(),
-                'market_cap_usd': liquidity_usd * random.uniform(2, 50),
-                'volume_24h_usd': liquidity_usd * random.uniform(0.1, 5),
-                'price_change_24h': random.uniform(-50, 200),
-                'holder_count': random.randint(100, 10000),
-                'contract_verified': random.choice([True, False])
-            }
-            
-            # Create trading opportunity
-            opportunity = TradingOpportunity(
-                token=token_info,
-                liquidity=liquidity_info,
-                contract_analysis=contract_analysis,
-                social_metrics=social_metrics,
-                detected_at=datetime.now(),
-                metadata=metadata
-            )
-            
-            # Set additional attributes
-            opportunity.chain = chain
-            opportunity.confidence_score = metadata['trading_score']['overall_score']
-            
-            return opportunity
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create test opportunity: {e}")
-            return None
-
-
-
-
-
-
-
-
-
-
-
 
     async def start(self) -> None:
         """
@@ -831,7 +642,10 @@ class EnhancedTradingSystem:
             for monitor in monitors:
                 if monitor:
                     try:
-                        await monitor.stop()
+                        if hasattr(monitor, 'stop') and callable(monitor.stop):
+                            await monitor.stop()
+                        else:
+                            monitor.stop()
                     except Exception as e:
                         self.logger.error(f"Error stopping monitor {monitor.__class__.__name__}: {e}")
             
@@ -869,7 +683,7 @@ class EnhancedTradingSystem:
             await self._cleanup_async_sessions()
             
             # Close trading positions if configured
-            if self.position_manager and settings.get('close_positions_on_shutdown', False):
+            if self.position_manager and getattr(settings, 'close_positions_on_shutdown', False):
                 await self.position_manager.close_all_positions()
             
             self.logger.info("✅ System shutdown complete")
@@ -891,7 +705,7 @@ class EnhancedTradingSystem:
             
             # Process each test opportunity
             for opportunity in test_opportunities:
-                await self.opportunity_handler.handle_new_opportunity(opportunity)
+                await self.opportunity_handler.handle_opportunity(opportunity)
                 await asyncio.sleep(2)  # Stagger for demonstration
             
             self.logger.info(f"✅ Generated {len(test_opportunities)} test opportunities")
@@ -900,74 +714,188 @@ class EnhancedTradingSystem:
             self.logger.error(f"Failed to generate test opportunities: {e}")
 
     async def _create_test_opportunities(self) -> List[TradingOpportunity]:
-        """Create a list of test trading opportunities."""
-        from models.token import TokenInfo, LiquidityInfo, SocialMetrics, ContractAnalysis
-        
+        """Create a list of test trading opportunities with correct model usage."""
         test_opportunities = []
         
-        # Test Ethereum opportunity
-        eth_opportunity = TradingOpportunity(
-            token_info=TokenInfo(
+        try:
+            # Test Ethereum opportunity - FIXED model usage
+            eth_token = TokenInfo(
                 address="0x1234567890abcdef1234567890abcdef12345678",
                 symbol="TESTETH",
                 name="Test Ethereum Token",
                 decimals=18,
-                chain="ethereum"
-            ),
-            liquidity_info=LiquidityInfo(
-                total_liquidity_usd=Decimal("150000"),
-                liquidity_locked_percentage=85.5,
-                largest_holder_percentage=12.3
-            ),
-            social_metrics=SocialMetrics(
+                total_supply=1000000000
+            )
+            
+            eth_liquidity = LiquidityInfo(
+                pair_address="0x1234567890abcdef1234567890abcdef12345678",
+                dex_name="Uniswap V2",
+                token0="0x1234567890abcdef1234567890abcdef12345678",
+                token1="0x0000000000000000000000000000000000000000",
+                reserve0=75000.0,
+                reserve1=75000.0,
+                liquidity_usd=150000.0,
+                created_at=datetime.now(),
+                block_number=18500000
+            )
+            
+            eth_contract = ContractAnalysis(
+                is_honeypot=False,
+                is_mintable=False,
+                is_pausable=False,
+                has_blacklist=False,
+                ownership_renounced=True,
+                liquidity_locked=True,
+                risk_score=0.2,
+                risk_level=RiskLevel.LOW,
+                analysis_notes=["Verified contract", "Ownership renounced", "Liquidity locked"]
+            )
+            
+            eth_social = SocialMetrics(
                 twitter_followers=15000,
                 telegram_members=8500,
-                reddit_members=2300
-            ),
-            contract_analysis=ContractAnalysis(
-                is_verified=True,
-                has_mint_function=False,
-                has_blacklist=False,
-                ownership_renounced=True
-            ),
-            risk_level=RiskLevel.MEDIUM,
-            confidence_score=Decimal("78.5"),
-            detected_at=datetime.now(),
-            source="test_generator"
-        )
-        test_opportunities.append(eth_opportunity)
-        
-        # Test Solana opportunity  
-        sol_opportunity = TradingOpportunity(
-            token_info=TokenInfo(
-                address="So11111111111111111111111111111111111111112",
+                discord_members=2300,
+                reddit_subscribers=1200,
+                website_url="https://testeth.com",
+                social_score=0.85,
+                sentiment_score=0.7
+            )
+            
+            eth_opportunity = TradingOpportunity(
+                token=eth_token,
+                liquidity=eth_liquidity,
+                contract_analysis=eth_contract,
+                social_metrics=eth_social,
+                detected_at=datetime.now(),
+                confidence_score=0.785,
+                metadata={
+                    'chain': 'ethereum',
+                    'source': 'test_generator',
+                    'recommendation': {'action': 'BUY', 'confidence': 'HIGH'},
+                    'trading_score': {'overall_score': 0.785}
+                }
+            )
+            test_opportunities.append(eth_opportunity)
+            
+            # Test Solana opportunity - FIXED model usage
+            sol_token = TokenInfo(
+                address="0xabcdef1234567890abcdef1234567890abcdef12",  # Use valid format for testing
                 symbol="TESTSOL",
                 name="Test Solana Token",
                 decimals=9,
-                chain="solana"
-            ),
-            liquidity_info=LiquidityInfo(
-                total_liquidity_usd=Decimal("75000"),
-                liquidity_locked_percentage=92.1,
-                largest_holder_percentage=8.7
-            ),
-            social_metrics=SocialMetrics(
+                total_supply=500000000
+            )
+            
+            sol_liquidity = LiquidityInfo(
+                pair_address="0xabcdef1234567890abcdef1234567890abcdef12",
+                dex_name="Raydium",
+                token0="0xabcdef1234567890abcdef1234567890abcdef12",
+                token1="0x" + "1" * 40,  # SOL representation
+                reserve0=37500.0,
+                reserve1=37500.0,
+                liquidity_usd=75000.0,
+                created_at=datetime.now(),
+                block_number=200000000
+            )
+            
+            sol_contract = ContractAnalysis(
+                is_honeypot=False,
+                is_mintable=False,
+                is_pausable=False,
+                has_blacklist=False,
+                ownership_renounced=True,
+                liquidity_locked=True,
+                risk_score=0.15,
+                risk_level=RiskLevel.LOW,
+                analysis_notes=["Solana program verified", "Mint authority disabled"]
+            )
+            
+            sol_social = SocialMetrics(
                 twitter_followers=25000,
                 telegram_members=12000,
-                reddit_members=4500
-            ),
-            contract_analysis=ContractAnalysis(
-                is_verified=True,
-                has_mint_function=False,
+                discord_members=4500,
+                reddit_subscribers=2100,
+                website_url="https://testsol.com",
+                social_score=0.92,
+                sentiment_score=0.8
+            )
+            
+            sol_opportunity = TradingOpportunity(
+                token=sol_token,
+                liquidity=sol_liquidity,
+                contract_analysis=sol_contract,
+                social_metrics=sol_social,
+                detected_at=datetime.now(),
+                confidence_score=0.852,
+                metadata={
+                    'chain': 'solana',
+                    'source': 'test_generator',
+                    'recommendation': {'action': 'BUY', 'confidence': 'HIGH'},
+                    'trading_score': {'overall_score': 0.852}
+                }
+            )
+            test_opportunities.append(sol_opportunity)
+            
+            # Test Base opportunity - FIXED model usage
+            base_token = TokenInfo(
+                address="0xfedcba0987654321fedcba0987654321fedcba09",
+                symbol="TESTBASE",
+                name="Test Base Token",
+                decimals=18,
+                total_supply=2000000000
+            )
+            
+            base_liquidity = LiquidityInfo(
+                pair_address="0xfedcba0987654321fedcba0987654321fedcba09",
+                dex_name="BaseSwap",
+                token0="0xfedcba0987654321fedcba0987654321fedcba09",
+                token1="0x0000000000000000000000000000000000000000",
+                reserve0=50000.0,
+                reserve1=50000.0,
+                liquidity_usd=100000.0,
+                created_at=datetime.now(),
+                block_number=8500000
+            )
+            
+            base_contract = ContractAnalysis(
+                is_honeypot=False,
+                is_mintable=True,
+                is_pausable=False,
                 has_blacklist=False,
-                ownership_renounced=True
-            ),
-            risk_level=RiskLevel.LOW,
-            confidence_score=Decimal("85.2"),
-            detected_at=datetime.now(),
-            source="test_generator"
-        )
-        test_opportunities.append(sol_opportunity)
+                ownership_renounced=False,
+                liquidity_locked=False,
+                risk_score=0.6,
+                risk_level=RiskLevel.MEDIUM,
+                analysis_notes=["Mintable token", "Owner not renounced", "Moderate risk"]
+            )
+            
+            base_social = SocialMetrics(
+                twitter_followers=8000,
+                telegram_members=3500,
+                discord_members=1200,
+                reddit_subscribers=600,
+                social_score=0.65,
+                sentiment_score=0.4
+            )
+            
+            base_opportunity = TradingOpportunity(
+                token=base_token,
+                liquidity=base_liquidity,
+                contract_analysis=base_contract,
+                social_metrics=base_social,
+                detected_at=datetime.now(),
+                confidence_score=0.55,
+                metadata={
+                    'chain': 'base',
+                    'source': 'test_generator',
+                    'recommendation': {'action': 'MONITOR', 'confidence': 'MEDIUM'},
+                    'trading_score': {'overall_score': 0.55}
+                }
+            )
+            test_opportunities.append(base_opportunity)
+            
+        except Exception as e:
+            self.logger.error(f"Error creating test opportunities: {e}")
         
         return test_opportunities
 
@@ -1096,14 +1024,9 @@ class EnhancedTradingSystem:
                 except Exception as e:
                     self.logger.error(f"Failed to start system monitoring: {e}")
             
-            # Start dashboard if enabled
-            if not self.disable_dashboard:
-                try:
-                    # Dashboard server doesn't have start() method, it's initialized in _initialize_dashboard
-                    # Just log that it's available
-                    self.logger.info("✅ Dashboard server available at http://localhost:8000")
-                except Exception as e:
-                    self.logger.error(f"Dashboard server error: {e}")
+            # Dashboard is already started in _initialize_dashboard
+            if not self.disable_dashboard and self.dashboard_port:
+                self.logger.info(f"✅ Dashboard server available at http://localhost:{self.dashboard_port}")
             
             self.logger.info(f"🎯 System running with {len(monitor_tasks)} active components")
             self.logger.info("💡 Press Ctrl+C to stop the system gracefully")
@@ -1149,14 +1072,6 @@ class EnhancedTradingSystem:
                 await self.shutdown()
             except Exception as e:
                 self.logger.error(f"Error during final shutdown: {e}")
-
-    async def start(self) -> None:
-        """
-        Alternative start method for simpler usage.
-        
-        This is an alias for run_with_signal_handling for compatibility.
-        """
-        await self.run_with_signal_handling()
 
     def update_analysis_stats(self, opportunity) -> None:
         """
@@ -1222,6 +1137,7 @@ class EnhancedTradingSystem:
             "telegram_notifications": not self.disable_telegram,
             "telegram_signals": self.enable_telegram_signals,
             "dashboard_enabled": not self.disable_dashboard,
+            "dashboard_port": self.dashboard_port,
             "opportunities_processed": self.opportunities_processed,
             "trades_executed": self.trades_executed,
             "notifications_sent": self.notifications_sent
