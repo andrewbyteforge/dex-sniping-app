@@ -347,6 +347,198 @@ class SolanaMonitor(BaseMonitor):
             "sol": "solana"
         }
 
+
+    async def _parse_solscan_tokens(self, data: Any, source_name: str) -> int:
+        """
+        Parse Solscan token list data to find new opportunities.
+        
+        Args:
+            data: Response data from Solscan API
+            source_name: Name of the data source for logging
+            
+        Returns:
+            int: Number of opportunities found
+        """
+        try:
+            self.logger.debug(f"🔍 {source_name}: Starting Solscan token parsing...")
+            
+            opportunities_found = 0
+            tokens_examined = 0
+            
+            # Handle different response formats
+            tokens_data = []
+            if isinstance(data, dict):
+                if "data" in data:
+                    tokens_data = data["data"]
+                elif "tokens" in data:
+                    tokens_data = data["tokens"]
+                elif "results" in data:
+                    tokens_data = data["results"]
+                else:
+                    # Assume the dict itself contains token data
+                    tokens_data = [data]
+            elif isinstance(data, list):
+                tokens_data = data
+            else:
+                self.logger.warning(f"⚠️  {source_name}: Unexpected data format: {type(data)}")
+                return 0
+            
+            self.logger.info(f"🔍 {source_name}: Processing {len(tokens_data)} tokens from Solscan...")
+            
+            # Process each token
+            for token_data in tokens_data[:50]:  # Limit to first 50 tokens
+                tokens_examined += 1
+                
+                if tokens_examined % 10 == 0:
+                    self.logger.debug(f"📊 {source_name}: Examined {tokens_examined} tokens so far...")
+                
+                try:
+                    # Extract token information
+                    token_address = token_data.get("address") or token_data.get("tokenAddress") or token_data.get("mint")
+                    token_symbol = token_data.get("symbol", "UNKNOWN")
+                    token_name = token_data.get("name", "Unknown")
+                    
+                    if not token_address:
+                        continue
+                    
+                    # Check if we should process this token
+                    if not self._should_process_token(token_address, token_symbol):
+                        continue
+                    
+                    # Extract additional Solscan-specific data
+                    market_cap = token_data.get("marketCap") or token_data.get("market_cap")
+                    price_usd = token_data.get("price") or token_data.get("priceUsd")
+                    volume_24h = token_data.get("volume24h") or token_data.get("volume_24h")
+                    
+                    # Get metadata if available
+                    metadata = token_data.get("metadata", {})
+                    if isinstance(metadata, dict):
+                        if not token_name or token_name == "Unknown":
+                            token_name = metadata.get("name", token_name)
+                        if not token_symbol or token_symbol == "UNKNOWN":
+                            token_symbol = metadata.get("symbol", token_symbol)
+                    
+                    self.logger.debug(f"🔍 {source_name}: Processing token {token_symbol} ({token_address[:8]}...)")
+                    
+                    # Create enhanced data structure
+                    enhanced_data = {
+                        "address": token_address,
+                        "symbol": token_symbol,
+                        "name": token_name,
+                        "price_usd": price_usd,
+                        "market_cap": market_cap,
+                        "volume_24h": volume_24h,
+                        "decimals": token_data.get("decimals", 9),
+                        "supply": token_data.get("supply") or token_data.get("totalSupply"),
+                        "holders": token_data.get("holders") or token_data.get("holderCount"),
+                        "created_at": token_data.get("createdAt") or token_data.get("createdTime"),
+                        "source": "solscan",
+                        "raw_data": token_data
+                    }
+                    
+                    # Create opportunity from the enhanced data
+                    opportunity = await self._create_opportunity_from_alternative_data(
+                        enhanced_data, source_name, "solscan"
+                    )
+                    
+                    if opportunity:
+                        await self._notify_callbacks(opportunity)
+                        self.processed_tokens.add(token_address)
+                        opportunities_found += 1
+                        self.logger.info(f"🎯 {source_name}: Created Solscan opportunity #{opportunities_found} for {token_symbol}")
+                        
+                        # Limit opportunities per API call
+                        if opportunities_found >= 5:
+                            break
+                
+                except Exception as e:
+                    self.logger.warning(f"⚠️  {source_name}: Error processing token {tokens_examined}: {e}")
+                    continue
+            
+            self.logger.info(f"📊 {source_name}: Solscan parsing complete - {opportunities_found} opportunities from {tokens_examined} tokens")
+            return opportunities_found
+            
+        except Exception as e:
+            self.logger.error(f"💥 {source_name}: Error parsing Solscan tokens - {e}")
+            return 0
+        
+
+
+    # ADD this method to monitors/solana_monitor.py (optional fix)
+
+    async def _parse_solscan_trending(self, data: Any, source_name: str) -> int:
+        """
+        Parse Solscan trending tokens.
+        
+        Args:
+            data: Response data from Solscan trending API
+            source_name: Name of the data source for logging
+            
+        Returns:
+            int: Number of opportunities found
+        """
+        try:
+            self.logger.debug(f"🔍 {source_name}: Starting Solscan trending parsing...")
+            
+            opportunities_found = 0
+            
+            # Handle different response formats
+            trending_data = []
+            if isinstance(data, dict):
+                if "data" in data:
+                    trending_data = data["data"]
+                elif "trending" in data:
+                    trending_data = data["trending"]
+                elif "tokens" in data:
+                    trending_data = data["tokens"]
+            elif isinstance(data, list):
+                trending_data = data
+            
+            self.logger.info(f"🔍 {source_name}: Processing {len(trending_data)} trending tokens...")
+            
+            for token_data in trending_data[:10]:  # Limit to top 10 trending
+                try:
+                    token_address = token_data.get("address") or token_data.get("tokenAddress")
+                    token_symbol = token_data.get("symbol", "UNKNOWN")
+                    
+                    if not token_address or not self._should_process_token(token_address, token_symbol):
+                        continue
+                    
+                    # Extract trending-specific data
+                    enhanced_data = {
+                        "address": token_address,
+                        "symbol": token_symbol,
+                        "name": token_data.get("name", "Unknown"),
+                        "price_usd": token_data.get("price"),
+                        "market_cap": token_data.get("marketCap"),
+                        "volume_24h": token_data.get("volume24h"),
+                        "price_change_24h": token_data.get("priceChange24h"),
+                        "trending_rank": token_data.get("rank"),
+                        "source": "solscan_trending"
+                    }
+                    
+                    opportunity = await self._create_opportunity_from_alternative_data(
+                        enhanced_data, source_name, "solscan_trending"
+                    )
+                    
+                    if opportunity:
+                        await self._notify_callbacks(opportunity)
+                        opportunities_found += 1
+                        self.logger.info(f"🎯 {source_name}: Created trending opportunity #{opportunities_found}")
+                        
+                except Exception as e:
+                    self.logger.warning(f"⚠️  {source_name}: Error processing trending token: {e}")
+                    continue
+            
+            self.logger.info(f"📊 {source_name}: Trending parsing complete - {opportunities_found} opportunities")
+            return opportunities_found
+            
+        except Exception as e:
+            self.logger.error(f"💥 {source_name}: Error parsing Solscan trending - {e}")
+            return 0
+
+
+
     def set_scorer(self, scorer: Any) -> None:
         """Set the trading scorer after initialization."""
         self.scorer = scorer
@@ -1228,25 +1420,54 @@ class SolanaMonitor(BaseMonitor):
             return False
 
     def _should_process_token(self, token_address: str, token_symbol: str) -> bool:
-        """Determine if token should be processed based on filtering criteria."""
-        if not token_address:
-            return False
+        """
+        Determine if a token should be processed based on filtering criteria.
+        
+        Args:
+            token_address: Token contract address
+            token_symbol: Token symbol
             
-        if token_address in self.known_tokens:
-            return False
+        Returns:
+            bool: True if token should be processed
+        """
+        try:
+            # Skip if already processed
+            if token_address in self.processed_tokens:
+                return False
             
-        if token_symbol.upper() in self.known_tokens:
-            return False
+            # Skip if address is invalid
+            if not token_address or len(token_address) < 32:
+                return False
             
-        if token_address in self.processed_tokens:
-            return False
+            # Skip major tokens (SOL, USDC, etc.)
+            major_tokens = {"SOL", "USDC", "USDT", "BTC", "ETH", "BONK", "WIF", "RAY"}
+            if token_symbol.upper() in major_tokens:
+                return False
             
-        # Skip major tokens
-        skip_symbols = {'USDC', 'USDT', 'SOL', 'WETH', 'BTC', 'ETH', 'BONK', 'WIF'}
-        if token_symbol.upper() in skip_symbols:
-            return False
+            # Skip test tokens
+            test_patterns = ["TEST", "FAKE", "SCAM", "EXAMPLE", "DEMO"]
+            if any(pattern in token_symbol.upper() for pattern in test_patterns):
+                return False
             
-        return True
+            # Skip very short or very long symbols
+            if len(token_symbol) < 2 or len(token_symbol) > 10:
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error checking if token should be processed: {e}")
+            return False
+
+
+
+
+
+
+
+
+
+
 
     async def _create_opportunity_from_alternative_data(
         self, 

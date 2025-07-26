@@ -421,7 +421,7 @@ class NewTokenMonitor(BaseMonitor):
             
     async def _get_token_info(self, token_address: str) -> Optional[TokenInfo]:
         """
-        Get basic information about a token on Base chain.
+        Get basic information about a token.
         
         Args:
             token_address: Token contract address
@@ -457,19 +457,18 @@ class NewTokenMonitor(BaseMonitor):
             except Exception:
                 total_supply = 0
             
-            # FIXED: Remove discovered_at parameter
+            # FIXED: Only pass valid TokenInfo parameters
             return TokenInfo(
                 address=token_address,
-                name=name,
                 symbol=symbol,
+                name=name,
                 decimals=decimals,
                 total_supply=total_supply
             )
             
         except Exception as e:
-            self.logger.error(f"Failed to get Base token info for {token_address}: {e}")
+            self.logger.error(f"Failed to get {self.chain} token info for {token_address}: {e}")
             return None
-
 
 
 

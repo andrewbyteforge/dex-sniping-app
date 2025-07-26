@@ -400,6 +400,14 @@ class BaseChainMonitor(BaseMonitor):
             self.logger.error(f"Error processing Base pair event: {e}")
             self.stats["errors_count"] += 1
 
+    #!/usr/bin/env python3
+    """
+    Fix for BaseChainMonitor TokenInfo creation error
+
+    UPDATE the _get_token_info method in monitors/base_chain_monitor.py
+    REPLACE the existing method with this corrected version
+    """
+
     async def _get_token_info(self, token_address: str) -> Optional[TokenInfo]:
         """
         Get basic information about a token on Base chain.
@@ -438,18 +446,24 @@ class BaseChainMonitor(BaseMonitor):
             except Exception:
                 total_supply = 0
             
+            # FIXED: Only pass valid TokenInfo parameters
+            # TokenInfo only accepts: address, symbol, name, decimals, total_supply
             return TokenInfo(
                 address=token_address,
-                name=name,
                 symbol=symbol,
+                name=name,
                 decimals=decimals,
-                total_supply=total_supply,
-                discovered_at=datetime.now()
+                total_supply=total_supply
             )
             
         except Exception as e:
             self.logger.error(f"Failed to get Base token info for {token_address}: {e}")
             return None
+
+
+
+
+
 
     async def _get_liquidity_info(
         self, 

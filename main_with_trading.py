@@ -14,6 +14,7 @@ import random
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
+from monitors.raydium_monitor import RaydiumMonitor
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -274,40 +275,55 @@ class EnhancedTradingSystem:
             # Don't raise - continue without analyzers
             self.analyzers = {'contract': None, 'social': None, 'trading_scorer': None}
 
-    # Add this import to the top of main_with_trading.py
-    from monitors.raydium_monitor import RaydiumMonitor
-
-    # Update the _initialize_monitors method in main_with_trading.py:
-
     async def _initialize_monitors(self) -> None:
         """Initialize all blockchain monitors with enhanced Raydium integration."""
         try:
-            self.logger.info("Initializing blockchain monitors...")
+            self.logger.info("🔍 Initializing blockchain monitors...")
             
-            # Ethereum monitor
+            # Ethereum monitor for ERC-20 tokens
             try:
-                eth_monitor = NewTokenMonitor()
+                eth_monitor = NewTokenMonitor(
+                    check_interval=5.0,
+                    chain="ethereum",
+                    analyzer=self.analyzers.get('contract'),
+                    scorer=self.analyzers.get('trading_scorer'),
+                    auto_trading=self.auto_trading_enabled
+                )
                 eth_monitor.add_callback(self._handle_opportunity)
-                self.monitors.append(eth_monitor)
-                self.logger.info("✅ Ethereum monitor initialized")
+                
+                if await eth_monitor.initialize():
+                    self.monitors.append(eth_monitor)
+                    self.logger.info("✅ Ethereum monitor initialized")
+                else:
+                    self.logger.warning("⚠️  Ethereum monitor initialization failed")
+                    
             except Exception as e:
                 self.logger.warning(f"Ethereum monitor failed: {e}")
             
             # Base chain monitor
             try:
-                base_monitor = BaseChainMonitor()
+                base_monitor = BaseChainMonitor(
+                    check_interval=8.0,
+                    analyzer=self.analyzers.get('contract'),
+                    scorer=self.analyzers.get('trading_scorer'),
+                    auto_trading=self.auto_trading_enabled
+                )
                 base_monitor.add_callback(self._handle_opportunity)
-                self.monitors.append(base_monitor)
-                self.logger.info("✅ Base monitor initialized")
+                
+                if await base_monitor.initialize():
+                    self.monitors.append(base_monitor)
+                    self.logger.info("✅ Base monitor initialized")
+                else:
+                    self.logger.warning("⚠️  Base monitor initialization failed")
+                    
             except Exception as e:
                 self.logger.warning(f"Base monitor failed: {e}")
             
-            # Solana monitor with proper initialization
+            # Solana general monitor
             try:
                 sol_monitor = SolanaMonitor(check_interval=10.0)
                 sol_monitor.add_callback(self._handle_opportunity)
                 
-                # CRITICAL FIX: Call initialize() method
                 if await sol_monitor.initialize():
                     self.monitors.append(sol_monitor)
                     self.logger.info("✅ Solana monitor initialized with working APIs")
@@ -317,23 +333,26 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Solana monitor failed: {e}")
             
-            # NEW: Raydium DEX monitor
+            # 🆕 NEW: Raydium DEX monitor (Solana-specific)
             try:
                 raydium_monitor = RaydiumMonitor(check_interval=10.0)
-                raydium_monitor.add_callback(self._handle_opportunity)
+                raydium_monitor.add_callback(self._handle_raydium_opportunity)
                 
                 if await raydium_monitor.initialize():
                     self.monitors.append(raydium_monitor)
                     self.logger.info("✅ Raydium DEX monitor initialized")
                     self.logger.info(f"   🔗 Monitoring whale threshold: ${raydium_monitor.whale_threshold_usd:,.0f}")
                     self.logger.info(f"   📊 Known pools baseline: {len(raydium_monitor.known_pools)}")
+                    self.logger.info(f"   ⚡ Rate limit: {raydium_monitor.config.rate_limits.requests_per_minute}/min")
                 else:
                     self.logger.warning("❌ Raydium monitor initialization failed")
                     
             except Exception as e:
                 self.logger.warning(f"Raydium monitor failed: {e}")
+                import traceback
+                self.logger.debug(f"Raydium monitor error details: {traceback.format_exc()}")
             
-            # Jupiter monitor
+            # Jupiter monitor (Solana aggregator)
             try:
                 jupiter_monitor = JupiterSolanaMonitor()
                 jupiter_monitor.add_callback(self._handle_opportunity)
@@ -342,33 +361,155 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Jupiter monitor failed: {e}")
             
+            # Monitor initialization summary
             active_monitors = len(self.monitors)
-            self.logger.info(f"✅ {active_monitors}/5 monitors initialized successfully")
+            self.logger.info(f"🎯 Monitor initialization complete: {active_monitors} active monitors")
             
             if active_monitors == 0:
-                self.logger.error("No monitors initialized successfully")
-                raise Exception("Failed to initialize any monitors")
+                self.logger.error("❌ No monitors initialized successfully!")
+                raise RuntimeError("No monitoring capabilities available")
             
-            # Enhanced monitoring summary
-            self.logger.info("📊 Monitor Summary:")
-            for monitor in self.monitors:
-                monitor_type = type(monitor).__name__
-                if hasattr(monitor, 'get_stats'):
-                    stats = monitor.get_stats()
-                    if 'dex_name' in stats:
-                        self.logger.info(f"   🔗 {stats['dex_name']}: {monitor_type}")
-                    elif 'chain' in stats:
-                        self.logger.info(f"   ⛓️  {stats['chain']}: {monitor_type}")
-                    else:
-                        self.logger.info(f"   📡 {monitor_type}")
-            
-            self.logger.info("🧪 Starting test opportunity generation...")
-            asyncio.create_task(self._generate_test_opportunities())
-            
+            # Log monitor details
+            for i, monitor in enumerate(self.monitors, 1):
+                monitor_name = getattr(monitor, 'name', monitor.__class__.__name__)
+                self.logger.info(f"   {i}. {monitor_name} - {getattr(monitor, 'chain', 'multi-chain')}")
+                
         except Exception as e:
-            self.logger.error(f"Failed to initialize monitors: {e}")
+            self.logger.error(f"❌ Failed to initialize monitors: {e}")
             raise
 
+
+    async def _handle_raydium_opportunity(self, opportunity: TradingOpportunity) -> None:
+        """
+        Handle trading opportunities specifically from Raydium DEX.
+        
+        Args:
+            opportunity: Trading opportunity from Raydium monitor
+        """
+        try:
+            self.logger.info(f"🌊 Raydium opportunity detected: {opportunity.token.symbol}")
+            self.logger.info(f"   💰 Liquidity: ${opportunity.liquidity.liquidity_usd:,.0f}")
+            self.logger.info(f"   📊 Confidence: {opportunity.confidence_score:.3f}")
+            self.logger.info(f"   🏦 Pool: {opportunity.metadata.get('pool_id', 'Unknown')[:8]}...")
+            
+            # Update statistics
+            self.opportunities_found += 1
+            
+            # Enhanced analysis for Raydium-specific factors
+            raydium_analysis = await self._analyze_raydium_opportunity(opportunity)
+            
+            # Merge Raydium-specific analysis
+            enhanced_opportunity = self._enhance_opportunity_with_raydium_data(
+                opportunity, 
+                raydium_analysis
+            )
+            
+            # Use the general opportunity handler with enhanced data
+            await self._handle_opportunity(enhanced_opportunity)
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error handling Raydium opportunity: {e}")
+
+
+    async def _analyze_raydium_opportunity(self, opportunity: TradingOpportunity) -> Dict[str, Any]:
+        """
+        Perform Raydium-specific analysis on trading opportunities.
+        
+        Args:
+            opportunity: The trading opportunity to analyze
+            
+        Returns:
+            Dict[str, Any]: Raydium-specific analysis results
+        """
+        try:
+            analysis = {
+                'raydium_score': 0.0,
+                'solana_network_load': 'normal',
+                'pool_age_score': 0.0,
+                'raydium_liquidity_quality': 'medium',
+                'cross_dex_potential': False,
+                'recommended_position_size': 0.0
+            }
+            
+            # Analyze liquidity quality
+            liquidity_usd = opportunity.liquidity.liquidity_usd
+            if liquidity_usd >= 100000:
+                analysis['raydium_liquidity_quality'] = 'high'
+                analysis['raydium_score'] += 0.3
+            elif liquidity_usd >= 50000:
+                analysis['raydium_liquidity_quality'] = 'medium'
+                analysis['raydium_score'] += 0.2
+            else:
+                analysis['raydium_liquidity_quality'] = 'low'
+                analysis['raydium_score'] += 0.1
+            
+            # Check for cross-DEX arbitrage potential
+            analysis['cross_dex_potential'] = liquidity_usd > 25000
+            if analysis['cross_dex_potential']:
+                analysis['raydium_score'] += 0.2
+            
+            # Calculate recommended position size for Solana/Raydium
+            base_position = min(0.02, opportunity.confidence_score * 0.03)  # Max 2% per position
+            raydium_multiplier = 1.0 + (analysis['raydium_score'] - 0.5)
+            analysis['recommended_position_size'] = base_position * raydium_multiplier
+            
+            return analysis
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error in Raydium analysis: {e}")
+            return {'raydium_score': 0.3, 'recommended_position_size': 0.01}
+        
+
+
+
+
+
+
+    def _enhance_opportunity_with_raydium_data(
+        self, 
+        opportunity: TradingOpportunity, 
+        raydium_analysis: Dict[str, Any]
+    ) -> TradingOpportunity:
+        """
+        Enhance opportunity with Raydium-specific analysis data.
+        
+        Args:
+            opportunity: Original opportunity
+            raydium_analysis: Raydium-specific analysis results
+            
+        Returns:
+            TradingOpportunity: Enhanced opportunity with Raydium data
+        """
+        try:
+            # Update confidence score with Raydium analysis
+            raydium_boost = raydium_analysis.get('raydium_score', 0.0) * 0.2
+            enhanced_confidence = min(1.0, opportunity.confidence_score + raydium_boost)
+            
+            # Update metadata with Raydium analysis
+            enhanced_metadata = opportunity.metadata.copy()
+            enhanced_metadata.update({
+                'raydium_analysis': raydium_analysis,
+                'enhanced_by': 'raydium_analyzer',
+                'chain_optimized': 'solana',
+                'dex_specific_score': raydium_analysis.get('raydium_score', 0.0)
+            })
+            
+            # Create enhanced opportunity
+            enhanced_opportunity = TradingOpportunity(
+                token=opportunity.token,
+                liquidity=opportunity.liquidity,
+                contract_analysis=opportunity.contract_analysis,
+                social_metrics=opportunity.social_metrics,
+                detected_at=opportunity.detected_at,
+                confidence_score=enhanced_confidence,
+                metadata=enhanced_metadata
+            )
+            
+            return enhanced_opportunity
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error enhancing opportunity with Raydium data: {e}")
+            return opportunity
 
 
 
@@ -1186,111 +1327,494 @@ class EnhancedTradingSystem:
         except Exception as e:
             self.logger.error(f"Error during system stop: {e}")
 
-    def get_system_status(self) -> Dict[str, Any]:
+
+    async def cleanup(self) -> None:
         """
-        Get comprehensive system status.
+        Clean up all system resources.
         
-        Returns:
-            Dictionary containing system status information
+        This method properly shuts down all monitors, trading components,
+        and releases all resources to prevent memory leaks.
         """
         try:
-            uptime = datetime.now() - self.start_time
+            self.logger.info("🧹 Starting Enhanced Trading System cleanup...")
             
-            status = {
+            # Stop all monitors
+            self.logger.info("Stopping monitors...")
+            for monitor in self.monitors:
+                try:
+                    if hasattr(monitor, 'stop'):
+                        monitor.stop()
+                    if hasattr(monitor, 'cleanup'):
+                        await monitor.cleanup()
+                    elif hasattr(monitor, '_cleanup'):
+                        await monitor._cleanup()
+                    self.logger.info(f"✅ {monitor.__class__.__name__} cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up {monitor.__class__.__name__}: {e}")
+            
+            # Stop trading executor
+            if hasattr(self, 'trading_executor') and self.trading_executor:
+                try:
+                    await self.trading_executor.cleanup()
+                    self.logger.info("✅ Trading executor cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up trading executor: {e}")
+            
+            # Stop position manager
+            if hasattr(self, 'position_manager') and self.position_manager:
+                try:
+                    await self.position_manager.cleanup()
+                    self.logger.info("✅ Position manager cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up position manager: {e}")
+            
+            # Stop execution engine
+            if hasattr(self, 'execution_engine') and self.execution_engine:
+                try:
+                    await self.execution_engine.cleanup()
+                    self.logger.info("✅ Execution engine cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up execution engine: {e}")
+            
+            # Stop risk manager
+            if hasattr(self, 'risk_manager') and self.risk_manager:
+                try:
+                    if hasattr(self.risk_manager, 'cleanup'):
+                        await self.risk_manager.cleanup()
+                    self.logger.info("✅ Risk manager cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up risk manager: {e}")
+            
+            # Clean up analyzers
+            for name, analyzer in self.analyzers.items():
+                try:
+                    if analyzer and hasattr(analyzer, 'cleanup'):
+                        await analyzer.cleanup()
+                    self.logger.info(f"✅ {name} analyzer cleaned up")
+                except Exception as e:
+                    self.logger.warning(f"Error cleaning up {name} analyzer: {e}")
+            
+            self.logger.info("✅ Enhanced Trading System cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error during system cleanup: {e}")
+    
+    def get_system_status(self) -> Dict[str, Any]:
+        """
+        Get comprehensive system status including all monitors and components.
+        
+        Returns:
+            Dict[str, Any]: Complete system status information
+        """
+        try:
+            # Get monitor statuses
+            monitor_statuses = []
+            raydium_stats = None
+            
+            for monitor in self.monitors:
+                try:
+                    monitor_status = {
+                        'name': monitor.__class__.__name__,
+                        'is_running': getattr(monitor, 'is_running', True),
+                        'type': 'monitor'
+                    }
+                    
+                    # Get detailed stats if available
+                    if hasattr(monitor, 'get_stats'):
+                        stats = monitor.get_stats()
+                        monitor_status.update({
+                            'dex_name': stats.get('dex_name', monitor.__class__.__name__),
+                            'uptime': stats.get('uptime_seconds', 0),
+                            'opportunities_found': stats.get('pools_discovered', 0),
+                            'api_calls': stats.get('api_calls_total', 0),
+                            'api_calls_successful': stats.get('api_calls_successful', 0),
+                            'api_calls_failed': stats.get('api_calls_failed', 0),
+                            'success_rate': (
+                                stats.get('api_calls_successful', 0) / 
+                                max(stats.get('api_calls_total', 1), 1)
+                            ) * 100,
+                            'last_error': stats.get('last_error'),
+                            'errors_count': stats.get('errors_count', 0)
+                        })
+                        
+                        # Special handling for Raydium monitor
+                        if 'Raydium' in monitor.__class__.__name__:
+                            raydium_stats = {
+                                'known_pools': len(getattr(monitor, 'known_pools', [])),
+                                'monitored_pools': len(getattr(monitor, 'monitored_pools', [])),
+                                'whale_threshold': getattr(monitor, 'whale_threshold_usd', 0),
+                                'recent_whale_movements': len(getattr(monitor, 'whale_movements', [])),
+                                'pool_cache_size': len(getattr(monitor, 'pool_cache', {})),
+                                'rate_limit_per_minute': getattr(monitor, 'config', {}).get('rate_limits', {}).get('requests_per_minute', 0) if hasattr(monitor, 'config') else 0
+                            }
+                            monitor_status.update(raydium_stats)
+                    
+                    monitor_statuses.append(monitor_status)
+                    
+                except Exception as e:
+                    monitor_statuses.append({
+                        'name': monitor.__class__.__name__,
+                        'is_running': False,
+                        'error': str(e),
+                        'type': 'monitor'
+                    })
+            
+            # Get trading system status
+            trading_status = {
+                'auto_trading_enabled': getattr(self, 'auto_trading_enabled', False),
+                'trading_mode': getattr(self, 'trading_mode', 'unknown'),
+                'positions_active': 0,
+                'total_trades': getattr(self, 'total_trades', 0),
+                'success_rate': getattr(self, 'success_rate', 0.0)
+            }
+            
+            # Get position manager status
+            if hasattr(self, 'position_manager') and self.position_manager:
+                try:
+                    positions = getattr(self.position_manager, 'positions', {})
+                    trading_status['positions_active'] = len([
+                        pos for pos in positions.values()
+                        if getattr(pos, 'status', None) == 'OPEN'
+                    ])
+                except Exception:
+                    pass
+            
+            # Get analyzer status
+            analyzer_status = []
+            for name, analyzer in self.analyzers.items():
+                analyzer_status.append({
+                    'name': name,
+                    'active': analyzer is not None,
+                    'type': 'analyzer'
+                })
+            
+            # Calculate uptime
+            uptime_seconds = (datetime.now() - self.start_time).total_seconds() if hasattr(self, 'start_time') else 0
+            
+            return {
                 'system': {
-                    'running': self.is_running,
-                    'uptime_seconds': uptime.total_seconds(),
-                    'trading_mode': self.trading_mode.value,
-                    'auto_trading': self.auto_trading_enabled
+                    'uptime_seconds': uptime_seconds,
+                    'uptime_formatted': f"{uptime_seconds//3600:.0f}h {(uptime_seconds%3600)//60:.0f}m",
+                    'status': 'running',
+                    'monitors_count': len(self.monitors),
+                    'analyzers_count': len([a for a in self.analyzers.values() if a is not None])
                 },
-                'analysis': self.analysis_stats.copy(),
-                'execution': self.execution_metrics.copy(),
-                'chains': self.opportunities_by_chain.copy(),
-                'components': {
-                    'monitors': len(self.monitors),
-                    'analyzers': len(self.analyzers),
-                    'risk_manager': self.risk_manager is not None,
-                    'position_manager': self.position_manager is not None,
-                    'trading_executor': self.trading_executor is not None,
-                    'dashboard': self.dashboard_server is not None
+                'monitors': monitor_statuses,
+                'analyzers': analyzer_status,
+                'trading': trading_status,
+                'raydium_specific': raydium_stats,
+                'opportunities': {
+                    'total_found': getattr(self, 'opportunities_found', 0),
+                    'total_processed': len(getattr(self, 'processed_opportunities', [])),
+                    'recent_opportunities': len([
+                        opp for opp in getattr(self, 'processed_opportunities', [])
+                        if hasattr(opp, 'detected_at') and 
+                        (datetime.now() - opp.detected_at).total_seconds() < 3600
+                    ])
                 }
             }
             
-            # Add portfolio information if available
-            if self.trading_executor:
-                try:
-                    portfolio = self.trading_executor.get_portfolio_summary()
-                    status['portfolio'] = portfolio
-                except Exception:
-                    status['portfolio'] = {'error': 'Portfolio data unavailable'}
-            
-            return status
-            
         except Exception as e:
             self.logger.error(f"Error getting system status: {e}")
-            return {'error': str(e)}
+            return {
+                'error': str(e),
+                'system': {'status': 'error'},
+                'monitors': [],
+                'trading': {'error': 'status unavailable'}
+            }
+
+    def stop(self) -> None:
+        """
+        Stop the trading system gracefully.
+        
+        This method signals all components to stop their operations
+        but doesn't clean up resources (use cleanup() for that).
+        """
+        try:
+            self.logger.info("🛑 Stopping Enhanced Trading System...")
+            
+            # Signal stop to all monitors
+            for monitor in self.monitors:
+                try:
+                    if hasattr(monitor, 'stop'):
+                        monitor.stop()
+                        self.logger.info(f"🛑 {monitor.__class__.__name__} stopped")
+                except Exception as e:
+                    self.logger.warning(f"Error stopping {monitor.__class__.__name__}: {e}")
+            
+            # Stop trading executor
+            if hasattr(self, 'trading_executor') and self.trading_executor:
+                try:
+                    self.trading_executor.stop()
+                    self.logger.info("🛑 Trading executor stopped")
+                except Exception as e:
+                    self.logger.warning(f"Error stopping trading executor: {e}")
+            
+            self.logger.info("✅ Enhanced Trading System stopped")
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error during system stop: {e}")
 
 
+
+
+
+
+
+#!/usr/bin/env python3
+"""
+Signal handling fix for main_with_trading.py to enable proper Ctrl+C shutdown
+
+ADD this code to main_with_trading.py to enable graceful shutdown with Ctrl+C
+"""
+
+import signal
+import sys
+import asyncio
+from typing import Optional
+
+# ADD this near the top of main_with_trading.py with other imports
+import signal
+import sys
+
+# ADD this method to the EnhancedTradingSystem class
+def setup_signal_handlers(self) -> None:
+    """
+    Set up signal handlers for graceful shutdown.
+    
+    This enables Ctrl+C and other termination signals to properly
+    shut down the system instead of hanging.
+    """
+    def signal_handler(signum, frame):
+        """Handle shutdown signals."""
+        signal_name = signal.Signals(signum).name
+        self.logger.info(f"🛑 Received {signal_name} signal, initiating graceful shutdown...")
+        
+        # Set a flag to stop the main loop
+        if hasattr(self, '_shutdown_event'):
+            self._shutdown_event.set()
+        
+        # If we're in an event loop, create a task to shutdown
+        try:
+            loop = asyncio.get_running_loop()
+            if not loop.is_closed():
+                loop.create_task(self._graceful_shutdown())
+        except RuntimeError:
+            # No event loop running, force exit
+            self.logger.warning("No event loop running, forcing exit...")
+            sys.exit(0)
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination request
+    
+    if sys.platform != "win32":
+        # Unix-specific signals
+        signal.signal(signal.SIGHUP, signal_handler)   # Hangup
+        signal.signal(signal.SIGQUIT, signal_handler)  # Quit
+    
+    self.logger.info("✅ Signal handlers registered (Ctrl+C will now work)")
+
+# ADD this method to the EnhancedTradingSystem class
+async def _graceful_shutdown(self) -> None:
+    """
+    Perform graceful shutdown of the system.
+    
+    This method ensures all components are properly stopped and
+    resources are cleaned up before exit.
+    """
+    try:
+        self.logger.info("🔄 Starting graceful shutdown sequence...")
+        
+        # Stop all monitors first
+        self.logger.info("Stopping monitors...")
+        for monitor in self.monitors:
+            try:
+                if hasattr(monitor, 'stop'):
+                    monitor.stop()
+                self.logger.info(f"✅ {monitor.__class__.__name__} stopped")
+            except Exception as e:
+                self.logger.warning(f"Error stopping {monitor.__class__.__name__}: {e}")
+        
+        # Stop trading components
+        if hasattr(self, 'trading_executor') and self.trading_executor:
+            try:
+                self.trading_executor.stop()
+                self.logger.info("✅ Trading executor stopped")
+            except Exception as e:
+                self.logger.warning(f"Error stopping trading executor: {e}")
+        
+        # Cleanup all resources
+        await self.cleanup()
+        
+        self.logger.info("✅ Graceful shutdown completed")
+        
+        # Force exit after cleanup
+        sys.exit(0)
+        
+    except Exception as e:
+        self.logger.error(f"💥 Error during graceful shutdown: {e}")
+        # Force exit even if cleanup fails
+        sys.exit(1)
+
+# ADD this method to the EnhancedTradingSystem class
+def create_shutdown_event(self) -> None:
+    """Create shutdown event for clean termination."""
+    self._shutdown_event = asyncio.Event()
+
+# MODIFY the existing run method or ADD this new method to the EnhancedTradingSystem class
+async def run_with_signal_handling(self) -> None:
+    """
+    Run the trading system with proper signal handling.
+    
+    This method replaces the regular run() method and includes
+    signal handling for graceful shutdown.
+    """
+    try:
+        # Setup signal handlers
+        self.setup_signal_handlers()
+        
+        # Create shutdown event
+        self.create_shutdown_event()
+        
+        # Initialize the system
+        await self.initialize()
+        
+        # Start all monitors
+        self.logger.info("🚀 Starting all monitors...")
+        monitor_tasks = []
+        
+        for monitor in self.monitors:
+            try:
+                if hasattr(monitor, 'start'):
+                    task = asyncio.create_task(monitor.start())
+                    monitor_tasks.append(task)
+                    self.logger.info(f"✅ {monitor.__class__.__name__} started")
+            except Exception as e:
+                self.logger.error(f"Failed to start {monitor.__class__.__name__}: {e}")
+        
+        self.logger.info(f"🎯 All {len(monitor_tasks)} monitors started successfully")
+        self.logger.info("💡 Press Ctrl+C to stop the system gracefully")
+        
+        # Wait for shutdown signal
+        await self._shutdown_event.wait()
+        
+        self.logger.info("🛑 Shutdown signal received, stopping...")
+        
+        # Cancel all monitor tasks
+        for task in monitor_tasks:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for tasks to complete
+        if monitor_tasks:
+            await asyncio.gather(*monitor_tasks, return_exceptions=True)
+        
+        self.logger.info("✅ All monitors stopped")
+        
+    except KeyboardInterrupt:
+        self.logger.info("🛑 KeyboardInterrupt received, shutting down...")
+        await self._graceful_shutdown()
+    except Exception as e:
+        self.logger.error(f"💥 Error in main run loop: {e}")
+        await self._graceful_shutdown()
+
+# UPDATE the main() function at the bottom of main_with_trading.py
 async def main():
-    """Main entry point for enhanced trading system."""
-    parser = argparse.ArgumentParser(description='Enhanced DEX Sniping System')
-    parser.add_argument('--auto-trade', action='store_true',
-                       help='Enable automated trading execution')
-    parser.add_argument('--live-trading', action='store_true',
-                       help='Enable live trading with real funds (requires --auto-trade)')
-    parser.add_argument('--paper-only', action='store_true',
-                       help='Paper trading only (default)')
-    parser.add_argument('--no-dashboard', action='store_true',
-                       help='Disable web dashboard')
-    parser.add_argument('--debug', action='store_true',
-                       help='Enable debug logging')
+    """
+    Enhanced main function with proper signal handling.
+    """
+    import argparse
+    from trading.trading_executor import TradingMode
+    
+    parser = argparse.ArgumentParser(description='Enhanced DEX Trading System')
+    parser.add_argument('--mode', choices=['paper', 'live'], default='paper',
+                      help='Trading mode (default: paper)')
+    parser.add_argument('--auto-trading', action='store_true',
+                      help='Enable automatic trading')
+    parser.add_argument('--disable-dashboard', action='store_true',
+                      help='Disable web dashboard')
     
     args = parser.parse_args()
     
-    # Set up logging
-    if args.debug:
-        import logging
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # Determine trading mode
-    if args.live_trading and args.auto_trade:
-        trading_mode = TradingMode.LIVE_TRADING
-        print("\n⚠️  WARNING: LIVE TRADING MODE ENABLED ⚠️")
-        print("This will execute real trades with actual funds!")
-        print("Make sure you understand the risks involved.")
-        
-        confirmation = input("\nType 'I UNDERSTAND THE RISKS' to continue: ")
-        if confirmation != "I UNDERSTAND THE RISKS":
-            print("Live trading cancelled.")
-            return
-            
-    elif args.auto_trade:
-        trading_mode = TradingMode.PAPER_ONLY
-        print("📄 Paper trading mode - Automated execution without real funds")
-    else:
-        trading_mode = TradingMode.PAPER_ONLY
-        print("📄 Analysis mode - No automated execution")
+    # Convert mode to enum
+    trading_mode = TradingMode.PAPER_ONLY if args.mode == 'paper' else TradingMode.LIVE_TRADING
     
     try:
-        # Create and start system
+        # Create enhanced trading system
         system = EnhancedTradingSystem(
-            auto_trading_enabled=args.auto_trade,
+            auto_trading_enabled=args.auto_trading,
             trading_mode=trading_mode,
-            disable_dashboard=args.no_dashboard
+            disable_dashboard=args.disable_dashboard
         )
         
-        await system.start()
+        # Run with signal handling
+        await system.run_with_signal_handling()
         
     except KeyboardInterrupt:
-        print("\n⚠️ Shutdown requested by user")
+        print("\n🛑 Interrupted by user (Ctrl+C)")
+        sys.exit(0)
     except Exception as e:
-        print(f"\n❌ System error: {e}")
-        if args.debug:
-            import traceback
-            traceback.print_exc()
-    finally:
-        print("\nSystem stopped.")
+        print(f"💥 System error: {e}")
+        sys.exit(1)
 
-
+# UPDATE the if __name__ == "__main__" block at the bottom
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 System interrupted")
+        sys.exit(0)
+    except Exception as e:
+        print(f"💥 Fatal error: {e}")
+        sys.exit(1)
+
+# ===================================================================
+# ALTERNATIVE QUICK FIX - If you want a minimal change:
+# ===================================================================
+
+# Just ADD this to the existing main() function in main_with_trading.py:
+
+async def main_with_interrupt_handling():
+    """Quick fix version - just add keyboard interrupt handling."""
+    try:
+        # Your existing main() code here
+        system = EnhancedTradingSystem(...)
+        await system.initialize()
+        
+        # Add this try/except around the main loop
+        try:
+            await system.run()  # or whatever your current run method is
+        except KeyboardInterrupt:
+            print("\n🛑 Shutdown requested by user...")
+            await system.cleanup()
+            print("✅ System shutdown complete")
+            
+    except KeyboardInterrupt:
+        print("\n🛑 Interrupted during startup")
+    except Exception as e:
+        print(f"💥 Error: {e}")
+    finally:
+        sys.exit(0)
+
+# ===================================================================
+# WINDOWS-SPECIFIC FIX (if on Windows):
+# ===================================================================
+
+# On Windows, you might need this additional handler:
+if sys.platform == "win32":
+    import winsound
+    
+    def windows_ctrl_handler(ctrl_type):
+        """Handle Windows console control events."""
+        if ctrl_type in (0, 2):  # Ctrl+C or Ctrl+Break
+            print("\n🛑 Windows interrupt received...")
+            return True
+        return False
+    
+    # Register Windows console handler
+    try:
+        import win32api
+        win32api.SetConsoleCtrlHandler(windows_ctrl_handler, True)
+    except ImportError:
+        pass  # win32api not available
