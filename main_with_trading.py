@@ -11,6 +11,7 @@ import asyncio
 import sys
 import os
 import argparse
+from typing import Optional
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -23,7 +24,7 @@ from utils.logger import logger_manager
 logger = logger_manager.get_logger("MainSystem")
 
 
-async def main():
+async def main() -> None:
     """
     Enhanced main function with Telegram signal integration and modular architecture.
     """
@@ -48,6 +49,8 @@ async def main():
     # Convert mode to enum
     trading_mode = TradingMode.PAPER_ONLY if args.mode == 'paper' else TradingMode.LIVE_TRADING
     
+    system: Optional[EnhancedTradingSystem] = None
+    
     try:
         logger.info("🚀 Starting Enhanced DEX Trading System")
         logger.info(f"   Mode: {args.mode}")
@@ -68,7 +71,8 @@ async def main():
         # Handle special modes
         if args.test_telegram:
             logger.info("🧪 Testing Telegram integration...")
-            await system._initialize_telegram_integration()
+            # FIX: Initialize the full system first, then test Telegram
+            await system.initialize()
             await system.telegram_manager.test_notifications()
             if system.telegram_manager.notifications_enabled:
                 print("✅ Telegram test notification sent!")
@@ -99,15 +103,25 @@ async def main():
     except KeyboardInterrupt:
         print("\n🛑 Interrupted by user (Ctrl+C)")
         logger.info("System interrupted by user")
+        if system:
+            try:
+                await system.shutdown()
+            except Exception as e:
+                logger.error(f"Error during shutdown: {e}")
         sys.exit(0)
     except Exception as e:
         error_msg = f"💥 System error: {e}"
         print(error_msg)
         logger.error(error_msg)
+        if system:
+            try:
+                await system.shutdown()
+            except Exception as shutdown_error:
+                logger.error(f"Error during emergency shutdown: {shutdown_error}")
         sys.exit(1)
 
 
-def display_startup_banner():
+def display_startup_banner() -> None:
     """Display startup banner with system information."""
     banner = """
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -125,8 +139,13 @@ def display_startup_banner():
     print(banner)
 
 
-def check_requirements():
-    """Check if all requirements are installed."""
+def check_requirements() -> bool:
+    """
+    Check if all requirements are installed.
+    
+    Returns:
+        True if all requirements are met, False otherwise
+    """
     try:
         required_modules = [
             'web3', 'aiohttp', 'asyncio', 'telethon'
@@ -151,7 +170,7 @@ def check_requirements():
         return False
 
 
-def display_usage_examples():
+def display_usage_examples() -> None:
     """Display usage examples."""
     examples = """
 🚀 USAGE EXAMPLES:

@@ -6,6 +6,8 @@ Handles both notifications and signal monitoring.
 File: core/telegram_manager.py
 Class: TelegramManager
 Methods: All Telegram-related functionality
+
+UPDATE: Added missing methods like test_notifications, send_system_startup, send_initialization_error
 """
 
 import asyncio
@@ -71,7 +73,12 @@ class TelegramManager:
         }
 
     async def initialize(self) -> None:
-        """Initialize all Telegram components."""
+        """
+        Initialize all Telegram components.
+        
+        Raises:
+            Exception: If critical initialization fails
+        """
         try:
             # Initialize notifications
             await self._initialize_notifications()
@@ -93,9 +100,14 @@ class TelegramManager:
                 
         except Exception as e:
             self.logger.error(f"Failed to initialize Telegram manager: {e}")
+            # Don't raise - let the system continue without Telegram
 
     async def _initialize_notifications(self) -> None:
-        """Initialize Telegram notifications."""
+        """
+        Initialize Telegram notifications.
+        
+        Sets up outbound notification system for trading alerts and system status.
+        """
         try:
             if self.trading_system.disable_telegram or not self.notifications_available:
                 self.logger.info("📱 Telegram notifications disabled or not available")
@@ -109,10 +121,11 @@ class TelegramManager:
                 
                 # Set notification thresholds based on trading mode
                 from trading.trading_executor import TradingMode
-                if self.trading_system.trading_mode == TradingMode.LIVE_TRADING:
-                    telegram_integration.min_score_threshold = 80.0
-                else:
-                    telegram_integration.min_score_threshold = 70.0
+                if hasattr(self.trading_system, 'trading_mode'):
+                    if self.trading_system.trading_mode == TradingMode.LIVE_TRADING:
+                        telegram_integration.min_score_threshold = 80.0
+                    else:
+                        telegram_integration.min_score_threshold = 70.0
             else:
                 self.logger.info("📱 Telegram notifications disabled (not configured)")
                 
@@ -121,44 +134,66 @@ class TelegramManager:
             self.notifications_enabled = False
 
     async def _initialize_signal_monitoring(self) -> None:
-        """Initialize Telegram signal monitoring."""
+        """
+        Initialize Telegram signal monitoring.
+        
+        Sets up inbound signal monitoring from configured Telegram channels.
+        """
         try:
             if not self.trading_system.enable_telegram_signals or not self.signals_available:
-                self.logger.info("📡 Telegram signal monitoring disabled")
+                self.logger.info("📱 Telegram signal monitoring disabled or not available")
                 return
             
-            self.logger.info("📡 Initializing Telegram signal monitoring...")
+            self.logger.info("📱 Initializing Telegram signal monitoring...")
+            
+            # Initialize signal integration
             self.signals_enabled = await telegram_signal_integration.initialize()
             
             if self.signals_enabled:
-                # Add callback to handle signals as opportunities
+                # Add signal callback to forward signals to opportunity handler
                 telegram_signal_integration.add_opportunity_callback(
-                    self.trading_system.opportunity_handler.handle_telegram_signal_opportunity
+                    self._handle_telegram_signal
                 )
-                
-                channels_active = telegram_signal_integration.stats.get('channels_active', 0)
-                self.logger.info(f"✅ Telegram signal monitoring enabled ({channels_active} channels)")
-                
-                # Send notification about signal monitoring
-                if self.notifications_enabled:
-                    await self.handle_system_status(
-                        "Signal Monitoring Started",
-                        f"Now monitoring {channels_active} Telegram channels for trading signals",
-                        {"channels": channels_active}
-                    )
+                self.logger.info("✅ Telegram signal monitoring enabled")
             else:
-                self.logger.warning("📡 Telegram signal monitoring failed to initialize")
+                self.logger.info("📱 Telegram signal monitoring disabled (not configured)")
                 
         except Exception as e:
             self.logger.warning(f"Telegram signal monitoring initialization failed: {e}")
             self.signals_enabled = False
 
+    async def _handle_telegram_signal(self, opportunity) -> None:
+        """
+        Handle incoming Telegram signal by forwarding to opportunity handler.
+        
+        Args:
+            opportunity: TradingOpportunity object converted from signal
+        """
+        try:
+            self.statistics['signals_received'] += 1
+            
+            # Forward to opportunity handler
+            if hasattr(self.trading_system, 'opportunity_handler'):
+                await self.trading_system.opportunity_handler.handle_new_opportunity(opportunity)
+                self.statistics['signals_processed'] += 1
+            
+            self.logger.info(f"Processed Telegram signal for {opportunity.token_info.symbol}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling Telegram signal: {e}")
+            self.statistics['signal_errors'] += 1
+
     # ========================================
-    # OUTBOUND NOTIFICATIONS
+    # NOTIFICATION METHODS
     # ========================================
 
-    async def handle_new_opportunity(self, opportunity) -> None:
-        """Handle new trading opportunity notification."""
+    async def send_opportunity_alert(self, opportunity) -> None:
+        """
+        Send trading opportunity notification.
+        
+        Args:
+            opportunity: TradingOpportunity object to alert about
+        """
         try:
             if not self.notifications_enabled:
                 return
@@ -168,11 +203,16 @@ class TelegramManager:
             self.statistics['last_notification'] = datetime.now()
             
         except Exception as e:
-            self.logger.error(f"Error sending opportunity notification: {e}")
+            self.logger.error(f"Error sending opportunity alert: {e}")
             self.statistics['notification_errors'] += 1
 
-    async def handle_trading_alert(self, alert_data: Dict[str, Any]) -> None:
-        """Handle trading alerts with Telegram notifications."""
+    async def send_trade_alert(self, alert_data: Dict[str, Any]) -> None:
+        """
+        Send trading execution alert.
+        
+        Args:
+            alert_data: Dictionary containing trade execution information
+        """
         try:
             if not self.notifications_enabled:
                 return
@@ -209,8 +249,15 @@ class TelegramManager:
             self.logger.error(f"Error handling trading alert: {e}")
             self.statistics['notification_errors'] += 1
 
-    async def handle_system_status(self, status_type: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
-        """Send system status notification."""
+    async def send_system_status(self, status_type: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Send system status notification.
+        
+        Args:
+            status_type: Type of status update
+            message: Status message
+            data: Additional status data
+        """
         try:
             if not self.notifications_enabled:
                 return
@@ -223,8 +270,12 @@ class TelegramManager:
             self.logger.error(f"Error sending system status: {e}")
             self.statistics['notification_errors'] += 1
 
-    async def send_startup_notifications(self) -> None:
-        """Send startup notifications."""
+    async def send_system_startup(self) -> None:
+        """
+        Send system startup notification.
+        
+        Notifies about successful system initialization and current configuration.
+        """
         try:
             if not self.notifications_enabled:
                 return
@@ -234,10 +285,9 @@ class TelegramManager:
                 message="Multi-chain trading bot has started successfully and is monitoring for opportunities",
                 data={
                     "version": "2.0",
-                    "trading_mode": self.trading_system.trading_mode.value,
+                    "trading_mode": getattr(self.trading_system.trading_mode, 'value', 'unknown'),
                     "auto_trading": self.trading_system.auto_trading_enabled,
                     "enabled_chains": ["ethereum", "base", "solana"],
-                    "monitors_count": len(self.trading_system.monitors),
                     "telegram_enabled": self.notifications_enabled,
                     "signal_monitoring": self.signals_enabled,
                     "dashboard_enabled": not self.trading_system.disable_dashboard,
@@ -245,238 +295,75 @@ class TelegramManager:
                 }
             )
             
+            self.logger.info("📱 System startup notification sent")
+            
         except Exception as e:
-            self.logger.error(f"Error sending startup notifications: {e}")
+            self.logger.error(f"Error sending startup notification: {e}")
 
-    async def send_shutdown_notification(self) -> None:
-        """Send shutdown notification."""
+    async def send_system_shutdown(self) -> None:
+        """
+        Send system shutdown notification.
+        
+        Notifies about graceful system shutdown and provides final summary.
+        """
         try:
             if not self.notifications_enabled:
                 return
+            
+            uptime_hours = 0
+            if hasattr(self.trading_system, 'start_time') and self.trading_system.start_time:
+                uptime_seconds = (datetime.now() - self.trading_system.start_time).total_seconds()
+                uptime_hours = round(uptime_seconds / 3600, 2)
             
             await telegram_integration.handle_system_status(
                 status_type="System Shutdown",
                 message="Trading bot is shutting down gracefully",
                 data={
                     "reason": "Manual shutdown",
-                    "uptime_hours": self.trading_system._get_uptime_hours()
+                    "uptime_hours": uptime_hours,
+                    "opportunities_processed": getattr(self.trading_system, 'opportunities_processed', 0),
+                    "trades_executed": getattr(self.trading_system, 'trades_executed', 0),
+                    "notifications_sent": self.statistics['notifications_sent']
                 }
             )
             
-            # Send final daily summary
-            await self.send_daily_summary()
-            
-            # Shutdown integration
-            await telegram_integration.shutdown()
+            self.logger.info("📱 System shutdown notification sent")
             
         except Exception as e:
             self.logger.error(f"Error sending shutdown notification: {e}")
 
-    async def send_daily_summary(self) -> None:
-        """Send daily trading summary."""
-        try:
-            if not self.notifications_enabled:
-                return
-            
-            # Calculate additional stats
-            win_rate = 0.0
-            if self.trading_system.analysis_stats["trades_executed"] > 0:
-                win_rate = (self.trading_system.analysis_stats["successful_trades"] / 
-                           self.trading_system.analysis_stats["trades_executed"]) * 100
-            
-            stats = {
-                'opportunities_found': self.trading_system.analysis_stats["opportunities_found"],
-                'trades_executed': self.trading_system.analysis_stats["trades_executed"],
-                'daily_pnl': float(self.trading_system.analysis_stats["total_pnl"]),
-                'win_rate': win_rate
-            }
-            
-            await telegram_integration.send_daily_summary(stats)
-            
-        except Exception as e:
-            self.logger.error(f"Error sending daily summary: {e}")
-
-    async def check_hourly_update(self) -> None:
-        """Check if it's time to send hourly status update."""
-        try:
-            if not self.notifications_enabled:
-                return
-            
-            current_time = datetime.now()
-            time_since_last = (current_time - self.last_hourly_update).total_seconds()
-            
-            # Send hourly update
-            if time_since_last >= 3600:  # 1 hour
-                await self._send_hourly_update()
-                self.last_hourly_update = current_time
-            
-        except Exception as e:
-            self.logger.error(f"Error checking hourly update: {e}")
-
-    async def _send_hourly_update(self) -> None:
-        """Send hourly status update."""
-        try:
-            stats = {
-                'opportunities_found': self.trading_system.analysis_stats.get("opportunities_found", 0),
-                'trades_executed': self.trading_system.analysis_stats.get("trades_executed", 0),
-                'daily_pnl': self.trading_system.execution_metrics.get("daily_pnl", 0),
-                'active_positions': self.trading_system.execution_metrics.get("position_count", 0),
-                'system_uptime': self.trading_system._get_uptime_hours(),
-                'telegram_notifications': self.statistics.get("notifications_sent", 0)
-            }
-            
-            # Format status message
-            message = f"System running smoothly. "
-            message += f"Found {stats['opportunities_found']} opportunities, "
-            message += f"executed {stats['trades_executed']} trades. "
-            
-            if stats['daily_pnl'] != 0:
-                pnl_emoji = "📈" if stats['daily_pnl'] > 0 else "📉"
-                message += f"Daily P&L: {pnl_emoji} ${stats['daily_pnl']:.2f}. "
-            
-            message += f"Sent {stats['telegram_notifications']} notifications."
-            
-            await self.handle_system_status("Hourly Status Update", message, stats)
-            
-        except Exception as e:
-            self.logger.error(f"Error sending hourly update: {e}")
-
-    # ========================================
-    # ERROR HANDLING
-    # ========================================
-
     async def send_initialization_error(self, error_message: str) -> None:
-        """Send initialization error notification."""
+        """
+        Send initialization error notification.
+        
+        Args:
+            error_message: Description of the initialization error
+        """
         try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_error(
-                    error_type="System Initialization Failed",
-                    error_message=error_message,
-                    details={"timestamp": datetime.now().isoformat()}
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending initialization error: {e}")
-
-    async def send_critical_error(self, error_message: str) -> None:
-        """Send critical error notification."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_error(
-                    error_type="Critical System Error",
-                    error_message=error_message,
-                    details={"timestamp": datetime.now().isoformat()}
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending critical error: {e}")
-
-    async def send_live_trading_warning(self, portfolio_limits) -> None:
-        """Send live trading warning."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_risk_warning(
-                    warning_type="Live Trading Mode Active",
-                    message="System is running in LIVE TRADING mode with real funds at risk",
-                    details={
-                        "max_exposure": f"${portfolio_limits.max_total_exposure_usd}",
-                        "max_position": f"${portfolio_limits.max_single_position_usd}",
-                        "daily_loss_limit": f"${portfolio_limits.max_daily_loss_usd}"
-                    }
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending live trading warning: {e}")
-
-    async def handle_opportunity_error(self, token_symbol: str, error_message: str) -> None:
-        """Handle opportunity processing error."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_error(
-                    error_type="Opportunity Processing Error",
-                    error_message=error_message,
-                    details={"token_symbol": token_symbol}
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending opportunity error: {e}")
-
-    async def handle_trading_error(self, token_symbol: str, error_message: str, token_address: str) -> None:
-        """Handle trading error."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_error(
-                    error_type="Trading Assessment Error",
-                    error_message=error_message,
-                    details={"token_symbol": token_symbol, "token_address": token_address}
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending trading error: {e}")
-
-    async def handle_raydium_error(self, opportunity, error_message: str) -> None:
-        """Handle Raydium processing error."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_error(
-                    error_type="Raydium Opportunity Processing Error",
-                    error_message=error_message,
-                    details={
-                        "token_symbol": getattr(opportunity.token, 'symbol', 'Unknown'),
-                        "pool_id": opportunity.metadata.get('pool_id', 'Unknown')
-                    }
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending Raydium error: {e}")
-
-    async def handle_monitoring_error(self, error_message: str) -> None:
-        """Handle monitoring error."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_error(
-                    error_type="System Monitoring Error",
-                    error_message=error_message,
-                    details={"timestamp": datetime.now().isoformat()}
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending monitoring error: {e}")
-
-    async def handle_telegram_signal_received(self, token_symbol: str, signal_type: str, 
-                                            channel: str, confidence: float, chain: str) -> None:
-        """Handle Telegram signal received notification."""
-        try:
-            if self.notifications_enabled:
-                await telegram_integration.handle_system_status(
-                    status_type="Telegram Signal Received",
-                    message=f"Received {signal_type.upper()} signal for {token_symbol} from @{channel}",
-                    data={
-                        "token": token_symbol,
-                        "signal_type": signal_type,
-                        "channel": channel,
-                        "confidence": confidence,
-                        "chain": chain
-                    }
-                )
-        except Exception as e:
-            self.logger.error(f"Error sending signal received notification: {e}")
-
-    # ========================================
-    # SIGNAL MONITORING
-    # ========================================
-
-    async def start_signal_monitoring(self) -> None:
-        """Start Telegram signal monitoring."""
-        try:
-            if not self.signals_enabled:
+            if not self.notifications_enabled:
                 return
             
-            self.logger.info("🎯 Starting Telegram channel monitoring...")
-            await telegram_signal_integration.start_monitoring()
+            await telegram_integration.handle_error(
+                error_type="System Initialization Error",
+                error_message=error_message,
+                details={
+                    "timestamp": datetime.now().isoformat(),
+                    "component": "EnhancedTradingSystem",
+                    "severity": "critical"
+                }
+            )
+            
+            self.logger.info("📱 Initialization error notification sent")
             
         except Exception as e:
-            self.logger.error(f"Error starting signal monitoring: {e}")
-
-    # ========================================
-    # UTILITIES
-    # ========================================
+            self.logger.error(f"Error sending initialization error notification: {e}")
 
     async def test_notifications(self) -> None:
-        """Send test notification."""
+        """
+        Send test notification to verify Telegram integration.
+        
+        Sends a test message to confirm the notification system is working correctly.
+        """
         try:
             if not self.notifications_enabled:
                 self.logger.warning("Telegram not enabled - cannot test")
@@ -485,39 +372,160 @@ class TelegramManager:
             await telegram_integration.handle_system_status(
                 status_type="Test Notification",
                 message="This is a test message to verify Telegram integration is working correctly",
-                data={"test": True, "timestamp": datetime.now().isoformat()}
+                data={
+                    "test": True, 
+                    "timestamp": datetime.now().isoformat(),
+                    "manager_version": "2.0",
+                    "features_enabled": {
+                        "notifications": self.notifications_enabled,
+                        "signal_monitoring": self.signals_enabled
+                    }
+                }
             )
             
             self.logger.info("📱 Test Telegram notification sent")
             
         except Exception as e:
             self.logger.error(f"Telegram test failed: {e}")
+            raise
 
-    async def cleanup(self) -> None:
-        """Cleanup Telegram resources."""
+    # ========================================
+    # SIGNAL MONITORING
+    # ========================================
+
+    async def start_signal_monitoring(self) -> None:
+        """
+        Start Telegram signal monitoring.
+        
+        Begins monitoring configured Telegram channels for trading signals.
+        """
+        try:
+            if not self.signals_enabled:
+                self.logger.info("Signal monitoring not enabled")
+                return
+            
+            self.logger.info("🎯 Starting Telegram channel monitoring...")
+            await telegram_signal_integration.start_monitoring()
+            
+        except Exception as e:
+            self.logger.error(f"Error starting signal monitoring: {e}")
+
+    async def stop_signal_monitoring(self) -> None:
+        """
+        Stop Telegram signal monitoring.
+        
+        Stops monitoring Telegram channels and cleans up resources.
+        """
         try:
             if self.signals_enabled and telegram_signal_integration:
                 await telegram_signal_integration.stop()
                 self.logger.info("✅ Telegram signal monitoring stopped")
                 
         except Exception as e:
-            self.logger.error(f"Error during Telegram cleanup: {e}")
+            self.logger.error(f"Error stopping signal monitoring: {e}")
+
+    # ========================================
+    # UTILITIES AND MANAGEMENT
+    # ========================================
+
+    async def shutdown(self) -> None:
+        """
+        Shutdown Telegram manager and cleanup resources.
+        
+        Gracefully stops all Telegram services and cleans up connections.
+        """
+        try:
+            # Send shutdown notification first
+            await self.send_system_shutdown()
+            
+            # Stop signal monitoring
+            await self.stop_signal_monitoring()
+            
+            # Shutdown notification integration
+            if self.notifications_enabled and telegram_integration:
+                await telegram_integration.shutdown()
+                self.logger.info("✅ Telegram notifications stopped")
+            
+            self.notifications_enabled = False
+            self.signals_enabled = False
+            
+            self.logger.info("📱 Telegram manager shutdown complete")
+                
+        except Exception as e:
+            self.logger.error(f"Error during Telegram shutdown: {e}")
 
     def get_statistics(self) -> Dict[str, Any]:
-        """Get Telegram manager statistics."""
-        base_stats = {
-            'notifications_enabled': self.notifications_enabled,
-            'signals_enabled': self.signals_enabled,
-            'notifications_available': self.notifications_available,
-            'signals_available': self.signals_available
+        """
+        Get Telegram manager statistics.
+        
+        Returns:
+            Dictionary containing usage statistics and status information
+        """
+        return {
+            "notifications_available": self.notifications_available,
+            "signals_available": self.signals_available,
+            "notifications_enabled": self.notifications_enabled,
+            "signals_enabled": self.signals_enabled,
+            "statistics": self.statistics.copy(),
+            "last_hourly_update": self.last_hourly_update.isoformat() if self.last_hourly_update else None
         }
+
+    async def send_daily_summary(self) -> None:
+        """
+        Send daily trading summary.
         
-        # Add notification stats
-        base_stats.update(self.statistics)
+        Provides a summary of the day's trading activity and system performance.
+        """
+        try:
+            if not self.notifications_enabled:
+                return
+            
+            # Collect summary data
+            summary_data = {
+                "opportunities_processed": getattr(self.trading_system, 'opportunities_processed', 0),
+                "trades_executed": getattr(self.trading_system, 'trades_executed', 0),
+                "notifications_sent": self.statistics['notifications_sent'],
+                "signals_received": self.statistics['signals_received'],
+                "uptime_hours": 0
+            }
+            
+            if hasattr(self.trading_system, 'start_time') and self.trading_system.start_time:
+                uptime_seconds = (datetime.now() - self.trading_system.start_time).total_seconds()
+                summary_data["uptime_hours"] = round(uptime_seconds / 3600, 2)
+            
+            await telegram_integration.handle_system_status(
+                status_type="Daily Summary",
+                message="Daily trading activity summary",
+                data=summary_data
+            )
+            
+            self.logger.info("📱 Daily summary sent")
+            
+        except Exception as e:
+            self.logger.error(f"Error sending daily summary: {e}")
+
+    async def send_error_notification(self, error_type: str, error_message: str, details: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Send error notification.
         
-        # Add signal stats if available
-        if self.signals_enabled and telegram_signal_integration:
-            signal_stats = telegram_signal_integration.get_statistics()
-            base_stats['signal_stats'] = signal_stats.get('integration', {})
-        
-        return base_stats
+        Args:
+            error_type: Type of error that occurred
+            error_message: Description of the error
+            details: Additional error details
+        """
+        try:
+            if not self.notifications_enabled:
+                return
+            
+            await telegram_integration.handle_error(
+                error_type=error_type,
+                error_message=error_message,
+                details=details or {}
+            )
+            
+            self.statistics['notifications_sent'] += 1
+            self.statistics['last_notification'] = datetime.now()
+            
+        except Exception as e:
+            self.logger.error(f"Error sending error notification: {e}")
+            self.statistics['notification_errors'] += 1

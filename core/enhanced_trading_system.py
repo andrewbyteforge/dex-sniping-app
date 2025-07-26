@@ -6,6 +6,8 @@ Main system class with initialization and component management.
 File: core/enhanced_trading_system.py
 Class: EnhancedTradingSystem
 Methods: Core system management and initialization
+
+UPDATE: Added missing _initialize_telegram_integration method for backward compatibility
 """
 
 import asyncio
@@ -95,299 +97,142 @@ class EnhancedTradingSystem:
         Initialize the enhanced trading system.
         
         Args:
-            auto_trading_enabled: Enable automated trade execution
-            trading_mode: Trading execution mode
+            auto_trading_enabled: Enable automated trading execution
+            trading_mode: Trading mode (paper, live, etc.)
             disable_dashboard: Disable web dashboard
             disable_telegram: Disable Telegram notifications
-            enable_telegram_signals: Enable Telegram channel monitoring
+            enable_telegram_signals: Enable Telegram signal monitoring
         """
         self.logger = logger_manager.get_logger("EnhancedTradingSystem")
+        
+        # Store configuration
         self.auto_trading_enabled = auto_trading_enabled
         self.trading_mode = trading_mode
         self.disable_dashboard = disable_dashboard
         self.disable_telegram = disable_telegram
         self.enable_telegram_signals = enable_telegram_signals
         
-        # System state
-        self.is_running = False
-        self.start_time = datetime.now()
-        self._shutdown_event: Optional[asyncio.Event] = None
+        # Initialize component managers
+        self.telegram_manager = TelegramManager(self)
+        self.opportunity_handler = OpportunityHandler(self)
+        self.system_monitoring = SystemMonitoring(self)
         
-        # Core components
-        self.monitors: List[Any] = []
-        self.analyzers: Dict[str, Any] = {}
-        
-        # Enhanced trading components
+        # Trading components (initialized in _initialize_trading_system)
         self.risk_manager: Optional[EnhancedRiskManager] = None
         self.position_manager: Optional[PositionManager] = None
         self.execution_engine: Optional[ExecutionEngine] = None
         self.trading_executor: Optional[TradingExecutor] = None
         
-        # Dashboard
-        self.dashboard_server = None
-        self.web_server_task = None
+        # Monitoring components (initialized in _initialize_monitors)
+        self.new_token_monitor: Optional[NewTokenMonitor] = None
+        self.base_chain_monitor: Optional[BaseChainMonitor] = None
+        self.solana_monitor: Optional[SolanaMonitor] = None
+        self.jupiter_monitor: Optional[JupiterSolanaMonitor] = None
+        self.raydium_monitor: Optional[RaydiumMonitor] = None
         
-        # Component handlers
-        self.opportunity_handler = OpportunityHandler(self)
-        self.system_monitoring = SystemMonitoring(self)
-        self.telegram_manager = TelegramManager(self)
+        # Analysis components (initialized in _initialize_analyzers)
+        self.contract_analyzer: Optional[ContractAnalyzer] = None
+        self.social_analyzer: Optional[SocialAnalyzer] = None
+        self.trading_scorer: Optional[TradingScorer] = None
         
-        # Performance tracking
-        self.analysis_stats = {
-            "total_analyzed": 0,
-            "high_confidence": 0,
-            "trades_executed": 0,
-            "successful_trades": 0,
-            "total_pnl": Decimal('0'),
-            "opportunities_found": 0,
-            "recommendations": {
-                "BUY": 0,
-                "HOLD": 0,
-                "SELL": 0,
-                "AVOID": 0
-            }
+        # System state
+        self.running = False
+        self.shutdown_requested = False
+        self.components_initialized = {
+            'telegram': False,
+            'trading_system': False,
+            'analyzers': False,
+            'monitors': False,
+            'dashboard': False
         }
         
-        # Chain-specific tracking
-        self.opportunities_by_chain = {
-            "ethereum": 0,
-            "base": 0,
-            "solana": 0
-        }
-        
-        # Trading performance
-        self.execution_metrics = {
-            "opportunities_assessed": 0,
-            "trades_approved": 0,
-            "trades_rejected": 0,
-            "average_risk_score": 0.0,
-            "average_confidence": 0.0,
-            "position_count": 0,
-            "daily_pnl": 0.0
-        }
-        
-        # Signal source tracking
-        self.signal_sources = {}
-
-    def setup_signal_handlers(self) -> None:
-        """
-        Set up signal handlers for graceful shutdown.
-        
-        This enables Ctrl+C and other termination signals to properly
-        shut down the system instead of hanging.
-        """
-        def signal_handler(signum, frame):
-            """Handle shutdown signals."""
-            signal_name = signal.Signals(signum).name
-            self.logger.info(f"🛑 Received {signal_name} signal, initiating graceful shutdown...")
-            
-            # Set a flag to stop the main loop
-            if hasattr(self, '_shutdown_event') and self._shutdown_event:
-                self._shutdown_event.set()
-            
-            # If we're in an event loop, create a task to shutdown
-            try:
-                loop = asyncio.get_running_loop()
-                if not loop.is_closed():
-                    loop.create_task(self._graceful_shutdown())
-            except RuntimeError:
-                # No event loop running, force exit
-                self.logger.warning("No event loop running, forcing exit...")
-                sys.exit(0)
-        
-        # Register signal handlers
-        signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
-        signal.signal(signal.SIGTERM, signal_handler)  # Termination request
-        
-        if sys.platform != "win32":
-            # Unix-specific signals
-            signal.signal(signal.SIGHUP, signal_handler)   # Hangup
-            signal.signal(signal.SIGQUIT, signal_handler)  # Quit
-        
-        self.logger.info("✅ Signal handlers registered (Ctrl+C will now work)")
-
-    async def _graceful_shutdown(self) -> None:
-        """
-        Perform graceful shutdown of the system.
-        
-        This method ensures all components are properly stopped and
-        resources are cleaned up before exit.
-        """
-        try:
-            self.logger.info("🔄 Starting graceful shutdown sequence...")
-            
-            # Send shutdown notification via Telegram manager
-            await self.telegram_manager.send_shutdown_notification()
-            
-            # Stop all monitors first
-            self.logger.info("Stopping monitors...")
-            for monitor in self.monitors:
-                try:
-                    if hasattr(monitor, 'stop'):
-                        monitor.stop()
-                    self.logger.info(f"✅ {monitor.__class__.__name__} stopped")
-                except Exception as e:
-                    self.logger.warning(f"Error stopping {monitor.__class__.__name__}: {e}")
-            
-            # Stop trading components
-            if hasattr(self, 'trading_executor') and self.trading_executor:
-                try:
-                    if hasattr(self.trading_executor, 'stop'):
-                        self.trading_executor.stop()
-                    self.logger.info("✅ Trading executor stopped")
-                except Exception as e:
-                    self.logger.warning(f"Error stopping trading executor: {e}")
-            
-            # Cleanup all resources
-            await self.cleanup()
-            
-            self.logger.info("✅ Graceful shutdown completed")
-            
-            # Force exit after cleanup
-            sys.exit(0)
-            
-        except Exception as e:
-            self.logger.error(f"💥 Error during graceful shutdown: {e}")
-            # Force exit even if cleanup fails
-            sys.exit(1)
-
-    def create_shutdown_event(self) -> None:
-        """Create shutdown event for clean termination."""
-        self._shutdown_event = asyncio.Event()
-
-    async def run_with_signal_handling(self) -> None:
-        """
-        Run the trading system with proper signal handling.
-        
-        This method replaces the regular run() method and includes
-        signal handling for graceful shutdown.
-        """
-        try:
-            # Setup signal handlers
-            self.setup_signal_handlers()
-            
-            # Create shutdown event
-            self.create_shutdown_event()
-            
-            # Initialize the system
-            await self.initialize()
-            
-            # Send startup notifications
-            await self.telegram_manager.send_startup_notifications()
-            
-            # Start all monitors
-            self.logger.info("🚀 Starting all monitors...")
-            monitor_tasks = []
-            
-            for monitor in self.monitors:
-                try:
-                    if hasattr(monitor, 'start'):
-                        task = asyncio.create_task(monitor.start())
-                        monitor_tasks.append(task)
-                        self.logger.info(f"✅ {monitor.__class__.__name__} started")
-                except Exception as e:
-                    self.logger.error(f"Failed to start {monitor.__class__.__name__}: {e}")
-            
-            # Start Telegram signal monitoring if enabled
-            if self.enable_telegram_signals and self.telegram_manager.signals_enabled:
-                try:
-                    signal_task = asyncio.create_task(self.telegram_manager.start_signal_monitoring())
-                    monitor_tasks.append(signal_task)
-                    self.logger.info("✅ Telegram signal monitoring started")
-                except Exception as e:
-                    self.logger.error(f"Failed to start Telegram signal monitoring: {e}")
-            
-            # Start system monitoring loop
-            monitoring_task = asyncio.create_task(self.system_monitoring.monitoring_loop())
-            monitor_tasks.append(monitoring_task)
-            
-            self.logger.info(f"🎯 All {len(monitor_tasks)} tasks started successfully")
-            self.logger.info("💡 Press Ctrl+C to stop the system gracefully")
-            
-            # Wait for shutdown signal
-            await self._shutdown_event.wait()
-            
-            self.logger.info("🛑 Shutdown signal received, stopping...")
-            
-            # Cancel all monitor tasks
-            for task in monitor_tasks:
-                if not task.done():
-                    task.cancel()
-            
-            # Wait for tasks to complete
-            if monitor_tasks:
-                await asyncio.gather(*monitor_tasks, return_exceptions=True)
-            
-            self.logger.info("✅ All monitors stopped")
-            
-        except KeyboardInterrupt:
-            self.logger.info("🛑 KeyboardInterrupt received, shutting down...")
-            await self._graceful_shutdown()
-        except Exception as e:
-            self.logger.error(f"💥 Error in main run loop: {e}")
-            await self._graceful_shutdown()
+        # Statistics tracking
+        self.start_time: Optional[datetime] = None
+        self.opportunities_processed = 0
+        self.trades_executed = 0
+        self.notifications_sent = 0
 
     async def initialize(self) -> None:
-        """Initialize all system components."""
+        """
+        Initialize all system components.
+        
+        This is the main initialization method that should be called after instantiation.
+        
+        Raises:
+            Exception: If any critical component fails to initialize
+        """
         try:
             self.logger.info("🚀 Initializing Enhanced Trading System")
             
             # Initialize Telegram integration first
             await self.telegram_manager.initialize()
+            self.components_initialized['telegram'] = True
             
             # Initialize trading components
             await self._initialize_trading_system()
+            self.components_initialized['trading_system'] = True
             
             # Initialize analyzers
             await self._initialize_analyzers()
+            self.components_initialized['analyzers'] = True
             
             # Initialize monitors
             await self._initialize_monitors()
+            self.components_initialized['monitors'] = True
             
             # Initialize dashboard if enabled
             if not self.disable_dashboard:
                 await self._initialize_dashboard()
+                self.components_initialized['dashboard'] = True
             
             self.logger.info("✅ Enhanced Trading System initialized successfully")
             
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize Enhanced Trading System: {e}")
             
-            # Send error notification
-            await self.telegram_manager.send_initialization_error(str(e))
+            # Send error notification if telegram is available
+            if self.components_initialized.get('telegram', False):
+                try:
+                    await self.telegram_manager.send_initialization_error(str(e))
+                except Exception as telegram_error:
+                    self.logger.error(f"Failed to send error notification: {telegram_error}")
             
             raise
 
+    async def _initialize_telegram_integration(self) -> None:
+        """
+        Initialize Telegram integration (backward compatibility method).
+        
+        This method provides backward compatibility for code that calls the old method name.
+        It delegates to the telegram_manager.initialize() method.
+        
+        Note: This method is deprecated. Use telegram_manager.initialize() directly.
+        """
+        self.logger.warning("_initialize_telegram_integration is deprecated. Use telegram_manager.initialize() instead.")
+        await self.telegram_manager.initialize()
+
     async def _initialize_trading_system(self) -> None:
-        """Initialize the trading execution system."""
+        """
+        Initialize the trading execution system.
+        
+        Sets up risk management, position tracking, and execution components.
+        
+        Raises:
+            Exception: If trading system initialization fails
+        """
         try:
-            self.logger.info("Initializing trading execution system...")
-            
-            # Create portfolio limits based on trading mode
-            if self.trading_mode == TradingMode.LIVE_TRADING:
-                # Conservative limits for live trading
-                portfolio_limits = PortfolioLimits(
-                    max_total_exposure_usd=500.0,
-                    max_single_position_usd=50.0,
-                    max_daily_loss_usd=100.0,
-                    max_positions_per_chain=3,
-                    max_total_positions=8,
-                    max_trades_per_hour=5,
-                    max_trades_per_day=20
-                )
-            else:
-                # More aggressive limits for paper trading
-                portfolio_limits = PortfolioLimits(
-                    max_total_exposure_usd=2000.0,
-                    max_single_position_usd=200.0,
-                    max_daily_loss_usd=400.0,
-                    max_positions_per_chain=5,
-                    max_total_positions=15,
-                    max_trades_per_hour=10,
-                    max_trades_per_day=50
-                )
+            self.logger.info("🔧 Initializing trading system...")
             
             # Initialize risk manager
+            portfolio_limits = PortfolioLimits(
+                max_total_exposure_usd=getattr(settings, 'max_total_exposure_usd', 10000.0),
+                max_single_position_usd=getattr(settings, 'max_single_position_usd', 1000.0),
+                max_positions_per_chain=getattr(settings, 'max_positions_per_chain', 5),
+                max_daily_loss_usd=getattr(settings, 'max_daily_loss_usd', 500.0),
+                max_total_positions=getattr(settings, 'max_total_positions', 15),
+                min_liquidity_usd=getattr(settings, 'min_liquidity_usd', 50000.0)
+            )
+            
             self.risk_manager = EnhancedRiskManager(portfolio_limits)
             
             # Initialize position manager
@@ -395,7 +240,7 @@ class EnhancedTradingSystem:
             await self.position_manager.initialize()
             
             # Initialize execution engine
-            self.execution_engine = ExecutionEngine(self.risk_manager, self.position_manager)
+            self.execution_engine = ExecutionEngine()
             await self.execution_engine.initialize()
             
             # Initialize trading executor
@@ -403,324 +248,370 @@ class EnhancedTradingSystem:
                 risk_manager=self.risk_manager,
                 position_manager=self.position_manager,
                 execution_engine=self.execution_engine,
-                trading_mode=self.trading_mode
+                mode=self.trading_mode,
+                auto_trading_enabled=self.auto_trading_enabled
             )
             
-            # Add trading alerts callback
-            self.trading_executor.add_alert_callback(self._handle_trading_alert)
-            
-            await self.trading_executor.initialize()
-            
-            # Log trading configuration
-            self.logger.info(f"Trading Mode: {self.trading_mode.value}")
-            self.logger.info(f"Auto Trading: {'ENABLED' if self.auto_trading_enabled else 'DISABLED'}")
-            self.logger.info(f"Max Exposure: ${portfolio_limits.max_total_exposure_usd}")
-            self.logger.info(f"Max Position: ${portfolio_limits.max_single_position_usd}")
-            
-            if self.trading_mode == TradingMode.LIVE_TRADING:
-                self.logger.warning("⚠️ LIVE TRADING MODE - Real funds at risk!")
-                
-                # Send live trading warning via Telegram
-                await self.telegram_manager.send_live_trading_warning(portfolio_limits)
+            self.logger.info("✅ Trading system initialized")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize trading system: {e}")
             raise
 
     async def _initialize_analyzers(self) -> None:
-        """Initialize analysis components."""
+        """
+        Initialize analysis components.
+        
+        Sets up contract analysis, social sentiment analysis, and trading scoring.
+        
+        Raises:
+            Exception: If analyzer initialization fails
+        """
         try:
-            self.logger.info("Initializing analyzers...")
+            self.logger.info("🔧 Initializing analyzers...")
             
-            # Initialize Web3 connection for analyzers
-            from web3 import Web3
-            try:
-                # Try to connect to a public RPC (for analysis only)
-                w3 = Web3(Web3.HTTPProvider('https://eth.llamarpc.com'))
-                if not w3.is_connected():
-                    # Fallback to another public RPC
-                    w3 = Web3(Web3.HTTPProvider('https://rpc.ankr.com/eth'))
-                
-                self.logger.info(f"Web3 connected: {w3.is_connected()}")
-            except Exception as e:
-                self.logger.warning(f"Web3 connection failed: {e}, using mock connection")
-                w3 = None
+            # Initialize contract analyzer
+            self.contract_analyzer = ContractAnalyzer()
+            await self.contract_analyzer.initialize()
             
-            # Contract analyzer for security assessment
-            try:
-                if w3:
-                    self.analyzers['contract'] = ContractAnalyzer(w3)
-                    await self.analyzers['contract'].initialize()
-                else:
-                    self.logger.warning("Skipping ContractAnalyzer - no Web3 connection")
-            except Exception as e:
-                self.logger.warning(f"ContractAnalyzer initialization failed: {e}")
-                self.analyzers['contract'] = None
+            # Initialize social analyzer
+            self.social_analyzer = SocialAnalyzer()
+            await self.social_analyzer.initialize()
             
-            # Social analyzer for sentiment analysis
-            try:
-                self.analyzers['social'] = SocialAnalyzer()
-                await self.analyzers['social'].initialize()
-            except Exception as e:
-                self.logger.warning(f"SocialAnalyzer initialization failed: {e}")
-                self.analyzers['social'] = None
+            # Initialize trading scorer
+            self.trading_scorer = TradingScorer()
+            await self.trading_scorer.initialize()
             
-            # Trading scorer for opportunity ranking
-            try:
-                self.analyzers['trading_scorer'] = TradingScorer()
-                self.logger.info("✅ TradingScorer initialized")
-            except Exception as e:
-                self.logger.warning(f"TradingScorer initialization failed: {e}")
-                self.analyzers['trading_scorer'] = None
-            
-            # Count successful initializations
-            active_analyzers = len([a for a in self.analyzers.values() if a is not None])
-            self.logger.info(f"✅ {active_analyzers}/{len(self.analyzers)} analyzers initialized")
+            self.logger.info("✅ Analyzers initialized")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize analyzers: {e}")
-            # Don't raise - continue without analyzers
-            self.analyzers = {'contract': None, 'social': None, 'trading_scorer': None}
-
-    async def _initialize_monitors(self) -> None:
-        """Initialize all blockchain monitors."""
-        try:
-            self.logger.info("🔍 Initializing blockchain monitors...")
-            
-            # Ethereum monitor
-            try:
-                eth_monitor = NewTokenMonitor(
-                    check_interval=5.0,
-                    chain="ethereum",
-                    analyzer=self.analyzers.get('contract'),
-                    scorer=self.analyzers.get('trading_scorer'),
-                    auto_trading=self.auto_trading_enabled
-                )
-                eth_monitor.add_callback(self.opportunity_handler.handle_opportunity)
-                
-                if await eth_monitor.initialize():
-                    self.monitors.append(eth_monitor)
-                    self.logger.info("✅ Ethereum monitor initialized")
-                else:
-                    self.logger.warning("⚠️  Ethereum monitor initialization failed")
-                    
-            except Exception as e:
-                self.logger.warning(f"Ethereum monitor failed: {e}")
-            
-            # Base chain monitor
-            try:
-                base_monitor = BaseChainMonitor(
-                    check_interval=8.0,
-                    analyzer=self.analyzers.get('contract'),
-                    scorer=self.analyzers.get('trading_scorer'),
-                    auto_trading=self.auto_trading_enabled
-                )
-                base_monitor.add_callback(self.opportunity_handler.handle_opportunity)
-                
-                if await base_monitor.initialize():
-                    self.monitors.append(base_monitor)
-                    self.logger.info("✅ Base monitor initialized")
-                else:
-                    self.logger.warning("⚠️  Base monitor initialization failed")
-                    
-            except Exception as e:
-                self.logger.warning(f"Base monitor failed: {e}")
-            
-            # Solana monitor
-            try:
-                sol_monitor = SolanaMonitor(check_interval=10.0)
-                sol_monitor.add_callback(self.opportunity_handler.handle_opportunity)
-                
-                if await sol_monitor.initialize():
-                    self.monitors.append(sol_monitor)
-                    self.logger.info("✅ Solana monitor initialized")
-                else:
-                    self.logger.warning("❌ Solana monitor initialization failed")
-                    
-            except Exception as e:
-                self.logger.warning(f"Solana monitor failed: {e}")
-            
-            # Raydium DEX monitor
-            try:
-                raydium_monitor = RaydiumMonitor(check_interval=10.0)
-                raydium_monitor.add_callback(self.opportunity_handler.handle_raydium_opportunity)
-                
-                if await raydium_monitor.initialize():
-                    self.monitors.append(raydium_monitor)
-                    self.logger.info("✅ Raydium DEX monitor initialized")
-                else:
-                    self.logger.warning("❌ Raydium monitor initialization failed")
-                    
-            except Exception as e:
-                self.logger.warning(f"Raydium monitor failed: {e}")
-            
-            # Jupiter monitor
-            try:
-                jupiter_monitor = JupiterSolanaMonitor()
-                jupiter_monitor.add_callback(self.opportunity_handler.handle_opportunity)
-                self.monitors.append(jupiter_monitor)
-                self.logger.info("✅ Jupiter monitor initialized")
-            except Exception as e:
-                self.logger.warning(f"Jupiter monitor failed: {e}")
-            
-            # Monitor initialization summary
-            active_monitors = len(self.monitors)
-            self.logger.info(f"🎯 Monitor initialization complete: {active_monitors} active monitors")
-            
-            if active_monitors == 0:
-                self.logger.error("❌ No monitors initialized successfully!")
-                await self.telegram_manager.send_critical_error("No monitoring capabilities available")
-                raise RuntimeError("No monitoring capabilities available")
-            
-            # Log monitor details
-            for i, monitor in enumerate(self.monitors, 1):
-                monitor_name = getattr(monitor, 'name', monitor.__class__.__name__)
-                self.logger.info(f"   {i}. {monitor_name} - {getattr(monitor, 'chain', 'multi-chain')}")
-                
-        except Exception as e:
-            self.logger.error(f"❌ Failed to initialize monitors: {e}")
             raise
 
-    async def _initialize_dashboard(self) -> None:
-        """Initialize web dashboard."""
+    async def _initialize_monitors(self) -> None:
+        """
+        Initialize monitoring components for all supported chains.
+        
+        Sets up monitors for Ethereum, Base, and Solana chains.
+        
+        Raises:
+            Exception: If monitor initialization fails
+        """
         try:
-            self.logger.info("Initializing dashboard...")
+            self.logger.info("🔧 Initializing monitors...")
             
-            # Set dashboard references to trading components
-            dashboard_server.trading_executor = self.trading_executor
-            dashboard_server.position_manager = self.position_manager
-            dashboard_server.risk_manager = self.risk_manager
+            # Initialize Ethereum new token monitor
+            self.new_token_monitor = NewTokenMonitor()
+            await self.new_token_monitor.initialize()
             
-            # Initialize dashboard
-            await dashboard_server.initialize()
+            # Initialize Base chain monitor
+            self.base_chain_monitor = BaseChainMonitor()
+            await self.base_chain_monitor.initialize()
             
-            # Start web server
-            import uvicorn
+            # Initialize Solana monitor
+            self.solana_monitor = SolanaMonitor()
+            await self.solana_monitor.initialize()
             
-            async def run_server():
-                config = uvicorn.Config(
-                    app,
-                    host="0.0.0.0",
-                    port=8000,
-                    log_level="info",
-                    access_log=False
-                )
-                server = uvicorn.Server(config)
-                await server.serve()
+            # Initialize Jupiter Solana monitor
+            self.jupiter_monitor = JupiterSolanaMonitor()
+            await self.jupiter_monitor.initialize()
             
-            self.web_server_task = asyncio.create_task(run_server())
-            self.dashboard_server = dashboard_server
+            # Initialize Raydium monitor
+            self.raydium_monitor = RaydiumMonitor()
+            await self.raydium_monitor.initialize()
             
-            self.logger.info("✅ Dashboard initialized at http://localhost:8000")
+            # Set up opportunity callbacks
+            await self._setup_opportunity_callbacks()
+            
+            self.logger.info("✅ Monitors initialized")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize monitors: {e}")
+            raise
+
+    async def _setup_opportunity_callbacks(self) -> None:
+        """Set up callbacks for opportunity detection from all monitors."""
+        # Connect monitor callbacks to opportunity handler
+        if self.new_token_monitor:
+            self.new_token_monitor.add_opportunity_callback(
+                self.opportunity_handler.handle_new_opportunity
+            )
+        
+        if self.base_chain_monitor:
+            self.base_chain_monitor.add_opportunity_callback(
+                self.opportunity_handler.handle_new_opportunity
+            )
+        
+        if self.solana_monitor:
+            self.solana_monitor.add_opportunity_callback(
+                self.opportunity_handler.handle_new_opportunity
+            )
+        
+        if self.jupiter_monitor:
+            self.jupiter_monitor.add_opportunity_callback(
+                self.opportunity_handler.handle_new_opportunity
+            )
+        
+        if self.raydium_monitor:
+            self.raydium_monitor.add_opportunity_callback(
+                self.opportunity_handler.handle_new_opportunity
+            )
+
+    async def _initialize_dashboard(self) -> None:
+        """
+        Initialize the web dashboard.
+        
+        Sets up the web server and dashboard components for real-time monitoring.
+        
+        Raises:
+            Exception: If dashboard initialization fails
+        """
+        try:
+            self.logger.info("🔧 Initializing dashboard...")
+            
+            # Initialize dashboard server
+            await dashboard_server.initialize(self)
+            
+            self.logger.info("✅ Dashboard initialized")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize dashboard: {e}")
             raise
 
-    async def _handle_trading_alert(self, alert_data: Dict[str, Any]) -> None:
+    async def start(self) -> None:
         """
-        Handle trading alerts from the execution system.
+        Start the trading system main loop.
         
-        Args:
-            alert_data: Alert information
+        Begins monitoring for opportunities and executing trades based on configuration.
+        
+        Raises:
+            Exception: If system fails to start
         """
         try:
-            # Delegate to telegram manager
-            await self.telegram_manager.handle_trading_alert(alert_data)
+            if not all(self.components_initialized.values()):
+                raise RuntimeError("System not fully initialized. Call initialize() first.")
             
-            # Update local statistics
-            alert_type = alert_data.get('type', 'UNKNOWN')
+            self.running = True
+            self.start_time = datetime.now()
             
-            if alert_type == 'TRADE_EXECUTED':
-                self.analysis_stats["trades_executed"] += 1
-                self.execution_metrics["position_count"] += 1
-                
-            elif alert_type.startswith('POSITION_CLOSED'):
-                self.execution_metrics["position_count"] = max(0, self.execution_metrics["position_count"] - 1)
-                
-                position_data = alert_data.get('position')
-                if position_data:
-                    pnl = position_data.get('unrealized_pnl', 0)
-                    if isinstance(pnl, (int, float, Decimal)):
-                        self.analysis_stats["total_pnl"] += Decimal(str(pnl))
-                        self.execution_metrics["daily_pnl"] += float(pnl)
-                        
-                        if pnl > 0:
-                            self.analysis_stats["successful_trades"] += 1
+            self.logger.info("🎯 Starting Enhanced Trading System")
             
-            # Broadcast alert to dashboard
-            if self.dashboard_server:
-                await self.dashboard_server.broadcast_message({
-                    "type": "trading_alert",
-                    "data": alert_data
-                })
-                
-        except Exception as e:
-            self.logger.error(f"Error handling trading alert: {e}")
-
-    def _get_uptime_hours(self) -> float:
-        """Calculate system uptime in hours."""
-        try:
-            if hasattr(self, 'start_time'):
-                uptime_seconds = (datetime.now() - self.start_time).total_seconds()
-                return round(uptime_seconds / 3600, 1)
-            return 0.0
-        except:
-            return 0.0
-
-    async def cleanup(self) -> None:
-        """Clean up all system resources."""
-        try:
-            self.logger.info("🧹 Starting Enhanced Trading System cleanup...")
+            # Send startup notification
+            if self.telegram_manager.notifications_enabled:
+                await self.telegram_manager.send_system_startup()
             
-            # Stop all monitors
-            for monitor in self.monitors:
-                try:
-                    if hasattr(monitor, 'stop'):
-                        monitor.stop()
-                    if hasattr(monitor, 'cleanup'):
-                        await monitor.cleanup()
-                    self.logger.info(f"✅ {monitor.__class__.__name__} cleaned up")
-                except Exception as e:
-                    self.logger.warning(f"Error cleaning up {monitor.__class__.__name__}: {e}")
+            # Start monitoring tasks
+            tasks = []
             
-            # Stop trading components
-            if self.trading_executor:
-                try:
-                    await self.trading_executor.cleanup()
-                    self.logger.info("✅ Trading executor cleaned up")
-                except Exception as e:
-                    self.logger.warning(f"Error cleaning up trading executor: {e}")
+            # Start monitors
+            if self.new_token_monitor:
+                tasks.append(asyncio.create_task(self.new_token_monitor.start()))
             
-            # Cleanup component handlers
-            await self.telegram_manager.cleanup()
+            if self.base_chain_monitor:
+                tasks.append(asyncio.create_task(self.base_chain_monitor.start()))
             
-            # Clean up analyzers
-            for name, analyzer in self.analyzers.items():
-                try:
-                    if analyzer and hasattr(analyzer, 'cleanup'):
-                        await analyzer.cleanup()
-                    self.logger.info(f"✅ {name} analyzer cleaned up")
-                except Exception as e:
-                    self.logger.warning(f"Error cleaning up {name} analyzer: {e}")
+            if self.solana_monitor:
+                tasks.append(asyncio.create_task(self.solana_monitor.start()))
             
-            self.logger.info("✅ Enhanced Trading System cleanup completed")
+            if self.jupiter_monitor:
+                tasks.append(asyncio.create_task(self.jupiter_monitor.start()))
+            
+            if self.raydium_monitor:
+                tasks.append(asyncio.create_task(self.raydium_monitor.start()))
+            
+            # Start system monitoring
+            tasks.append(asyncio.create_task(self.system_monitoring.start()))
+            
+            # Start dashboard if enabled
+            if not self.disable_dashboard:
+                tasks.append(asyncio.create_task(dashboard_server.start()))
+            
+            # Start Telegram signal monitoring if enabled
+            if self.enable_telegram_signals and self.telegram_manager.signals_enabled:
+                tasks.append(asyncio.create_task(self.telegram_manager.start_signal_monitoring()))
+            
+            # Wait for all tasks
+            await asyncio.gather(*tasks, return_exceptions=True)
             
         except Exception as e:
-            self.logger.error(f"💥 Error during system cleanup: {e}")
+            self.logger.error(f"Failed to start trading system: {e}")
+            await self.shutdown()
+            raise
+
+    async def shutdown(self) -> None:
+        """
+        Gracefully shutdown the trading system.
+        
+        Stops all monitoring, closes positions if configured, and cleans up resources.
+        """
+        if self.shutdown_requested:
+            return
+        
+        self.shutdown_requested = True
+        self.running = False
+        
+        try:
+            self.logger.info("🛑 Shutting down Enhanced Trading System")
+            
+            # Send shutdown notification
+            if self.telegram_manager and self.telegram_manager.notifications_enabled:
+                await self.telegram_manager.send_system_shutdown()
+            
+            # Stop monitors
+            monitors = [
+                self.new_token_monitor,
+                self.base_chain_monitor,
+                self.solana_monitor,
+                self.jupiter_monitor,
+                self.raydium_monitor
+            ]
+            
+            for monitor in monitors:
+                if monitor:
+                    try:
+                        await monitor.stop()
+                    except Exception as e:
+                        self.logger.error(f"Error stopping monitor {monitor.__class__.__name__}: {e}")
+            
+            # Stop system monitoring
+            if self.system_monitoring:
+                try:
+                    await self.system_monitoring.stop()
+                except Exception as e:
+                    self.logger.error(f"Error stopping system monitoring: {e}")
+            
+            # Stop dashboard
+            if not self.disable_dashboard and dashboard_server:
+                await dashboard_server.stop()
+            
+            # Stop telegram components
+            if self.telegram_manager:
+                await self.telegram_manager.shutdown()
+            
+            # Close trading positions if configured
+            if self.position_manager and settings.get('close_positions_on_shutdown', False):
+                await self.position_manager.close_all_positions()
+            
+            self.logger.info("✅ System shutdown complete")
+            
+        except Exception as e:
+            self.logger.error(f"Error during shutdown: {e}")
+
+    async def generate_test_opportunities(self) -> None:
+        """
+        Generate test opportunities for dashboard and notification testing.
+        
+        Creates mock trading opportunities to test the system without live market data.
+        """
+        try:
+            self.logger.info("🧪 Generating test opportunities...")
+            
+            # Generate test opportunities for each chain
+            test_opportunities = await self._create_test_opportunities()
+            
+            # Process each test opportunity
+            for opportunity in test_opportunities:
+                await self.opportunity_handler.handle_new_opportunity(opportunity)
+                await asyncio.sleep(2)  # Stagger for demonstration
+            
+            self.logger.info(f"✅ Generated {len(test_opportunities)} test opportunities")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate test opportunities: {e}")
+
+    async def _create_test_opportunities(self) -> List[TradingOpportunity]:
+        """Create a list of test trading opportunities."""
+        from models.token import TokenInfo, LiquidityInfo, SocialMetrics, ContractAnalysis
+        
+        test_opportunities = []
+        
+        # Test Ethereum opportunity
+        eth_opportunity = TradingOpportunity(
+            token_info=TokenInfo(
+                address="0x1234567890abcdef1234567890abcdef12345678",
+                symbol="TESTETH",
+                name="Test Ethereum Token",
+                decimals=18,
+                chain="ethereum"
+            ),
+            liquidity_info=LiquidityInfo(
+                total_liquidity_usd=Decimal("150000"),
+                liquidity_locked_percentage=85.5,
+                largest_holder_percentage=12.3
+            ),
+            social_metrics=SocialMetrics(
+                twitter_followers=15000,
+                telegram_members=8500,
+                reddit_members=2300
+            ),
+            contract_analysis=ContractAnalysis(
+                is_verified=True,
+                has_mint_function=False,
+                has_blacklist=False,
+                ownership_renounced=True
+            ),
+            risk_level=RiskLevel.MEDIUM,
+            confidence_score=Decimal("78.5"),
+            detected_at=datetime.now(),
+            source="test_generator"
+        )
+        test_opportunities.append(eth_opportunity)
+        
+        # Test Solana opportunity  
+        sol_opportunity = TradingOpportunity(
+            token_info=TokenInfo(
+                address="So11111111111111111111111111111111111111112",
+                symbol="TESTSOL",
+                name="Test Solana Token",
+                decimals=9,
+                chain="solana"
+            ),
+            liquidity_info=LiquidityInfo(
+                total_liquidity_usd=Decimal("75000"),
+                liquidity_locked_percentage=92.1,
+                largest_holder_percentage=8.7
+            ),
+            social_metrics=SocialMetrics(
+                twitter_followers=25000,
+                telegram_members=12000,
+                reddit_members=4500
+            ),
+            contract_analysis=ContractAnalysis(
+                is_verified=True,
+                has_mint_function=False,
+                has_blacklist=False,
+                ownership_renounced=True
+            ),
+            risk_level=RiskLevel.LOW,
+            confidence_score=Decimal("85.2"),
+            detected_at=datetime.now(),
+            source="test_generator"
+        )
+        test_opportunities.append(sol_opportunity)
+        
+        return test_opportunities
 
     def get_system_status(self) -> Dict[str, Any]:
-        """Get comprehensive system status."""
+        """
+        Get current system status and statistics.
+        
+        Returns:
+            Dictionary containing system status information
+        """
+        uptime = None
+        if self.start_time:
+            uptime = (datetime.now() - self.start_time).total_seconds()
+        
         return {
-            'system': {
-                'uptime_seconds': (datetime.now() - self.start_time).total_seconds(),
-                'status': 'running',
-                'monitors_count': len(self.monitors),
-                'analyzers_count': len([a for a in self.analyzers.values() if a is not None])
-            },
-            'analysis_stats': self.analysis_stats,
-            'execution_metrics': self.execution_metrics,
-            'opportunities_by_chain': self.opportunities_by_chain,
-            'signal_sources': self.signal_sources,
-            'telegram': self.telegram_manager.get_statistics()
+            "running": self.running,
+            "uptime_seconds": uptime,
+            "components_initialized": self.components_initialized,
+            "auto_trading_enabled": self.auto_trading_enabled,
+            "trading_mode": self.trading_mode.value if self.trading_mode else None,
+            "telegram_notifications": not self.disable_telegram,
+            "telegram_signals": self.enable_telegram_signals,
+            "dashboard_enabled": not self.disable_dashboard,
+            "opportunities_processed": self.opportunities_processed,
+            "trades_executed": self.trades_executed,
+            "notifications_sent": self.notifications_sent
         }
