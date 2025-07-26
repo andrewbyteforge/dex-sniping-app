@@ -1,7 +1,13 @@
-# api/dashboard_core.py
+#!/usr/bin/env python3
 """
 Core dashboard server class with WebSocket handling and business logic.
 Contains the main DashboardServer class and core functionality.
+
+File: api/dashboard_core.py
+Class: DashboardServer
+Methods: WebSocket management, opportunity handling, system integration
+
+UPDATE: Added missing stop/shutdown methods to fix shutdown errors
 """
 
 import asyncio
@@ -20,6 +26,13 @@ class DashboardServer:
     """
     Core dashboard server that provides WebSocket connections and business logic
     for real-time communication with the trading system.
+    
+    Features:
+    - WebSocket connection management
+    - Real-time opportunity broadcasting
+    - Trading system integration
+    - Client state management
+    - Graceful shutdown support
     """
     
     def __init__(self) -> None:
@@ -31,436 +44,436 @@ class DashboardServer:
         self.connected_clients: List[WebSocket] = []
         self.opportunities_queue: List[TradingOpportunity] = []
         
+        # Server state
+        self.is_running = False
+        self.cleanup_task: Optional[asyncio.Task] = None
+        
         # Statistics
         self.stats = {
             "total_opportunities": 0,
             "high_confidence": 0,
             "active_chains": 3,
             "analysis_rate": 0,
-            "uptime_start": datetime.now()
+            "uptime_start": datetime.now(),
+            "connected_clients": 0
         }
         
-    async def initialize(self) -> None:
+    async def initialize(self, trading_system=None) -> None:
         """
         Initialize the dashboard server.
         
+        Args:
+            trading_system: Optional reference to trading system
+            
         Raises:
             Exception: If initialization fails
         """
         try:
             self.logger.info("Initializing dashboard server...")
+            
+            # Store trading system reference if provided
+            if trading_system:
+                self.trading_executor = getattr(trading_system, 'trading_executor', None)
+                self.position_manager = getattr(trading_system, 'position_manager', None)
+                self.risk_manager = getattr(trading_system, 'risk_manager', None)
+            
+            # Start server
+            self.is_running = True
+            
             # Start periodic cleanup task
-            asyncio.create_task(self._periodic_cleanup_task())
-            self.logger.info("Dashboard server initialized successfully")
+            self.cleanup_task = asyncio.create_task(self._periodic_cleanup_task())
+            
+            self.logger.info("✅ Dashboard server initialized successfully")
+            
         except Exception as e:
             self.logger.error(f"Failed to initialize dashboard server: {e}")
             raise
+
+    async def stop(self) -> None:
+        """
+        Stop the dashboard server gracefully.
+        
+        Closes all WebSocket connections and cleans up resources.
+        """
+        try:
+            self.logger.info("🛑 Stopping dashboard server...")
+            
+            # Set running flag to false
+            self.is_running = False
+            
+            # Cancel cleanup task
+            if self.cleanup_task and not self.cleanup_task.done():
+                self.cleanup_task.cancel()
+                try:
+                    await self.cleanup_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # Close all WebSocket connections
+            await self._close_all_connections()
+            
+            # Clear data structures
+            self.opportunities_queue.clear()
+            
+            self.logger.info("✅ Dashboard server stopped")
+            
+        except Exception as e:
+            self.logger.error(f"Error stopping dashboard server: {e}")
+
+    async def shutdown(self) -> None:
+        """
+        Shutdown the dashboard server (alias for stop).
+        
+        Provides compatibility for different shutdown method names.
+        """
+        await self.stop()
+
+    async def _close_all_connections(self) -> None:
+        """
+        Close all WebSocket connections gracefully.
+        
+        Sends disconnect notification and closes connections.
+        """
+        try:
+            if not self.connected_clients:
+                return
+            
+            self.logger.info(f"Closing {len(self.connected_clients)} WebSocket connections...")
+            
+            # Send shutdown notification to all clients
+            shutdown_message = {
+                "type": "system_status",
+                "status": "shutting_down",
+                "message": "Server is shutting down",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Try to notify clients gracefully
+            disconnect_tasks = []
+            for client in self.connected_clients.copy():
+                try:
+                    # Send shutdown message
+                    await asyncio.wait_for(
+                        client.send_text(json.dumps(shutdown_message)),
+                        timeout=1.0
+                    )
+                    
+                    # Close connection
+                    disconnect_tasks.append(self._close_client_connection(client))
+                    
+                except Exception as e:
+                    self.logger.debug(f"Error notifying client during shutdown: {e}")
+                    # Force close if notification fails
+                    disconnect_tasks.append(self._close_client_connection(client))
+            
+            # Wait for all disconnections (with timeout)
+            if disconnect_tasks:
+                await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+            
+            # Clear the client list
+            self.connected_clients.clear()
+            
+            self.logger.info("✅ All WebSocket connections closed")
+            
+        except Exception as e:
+            self.logger.error(f"Error closing WebSocket connections: {e}")
+            # Force clear the list
+            self.connected_clients.clear()
+
+    async def _close_client_connection(self, client: WebSocket) -> None:
+        """
+        Close a single client connection safely.
+        
+        Args:
+            client: WebSocket client to close
+        """
+        try:
+            # Try to close the connection gracefully
+            await asyncio.wait_for(client.close(), timeout=2.0)
+        except Exception as e:
+            self.logger.debug(f"Error closing client connection: {e}")
+        finally:
+            # Remove from client list if still present
+            if client in self.connected_clients:
+                self.connected_clients.remove(client)
 
     async def broadcast_message(self, message: Dict[str, Any]) -> None:
         """
         Broadcast message to all connected WebSocket clients.
         
         Args:
-            message: Message to broadcast
+            message: Message dictionary to broadcast
         """
-        if not self.connected_clients:
+        if not self.connected_clients or not self.is_running:
             return
-            
-        disconnected_clients = []
         
         try:
-            # Debug logging for new opportunities
-            if message.get("type") == "new_opportunity":
-                data = message.get("data", {})
-                self.logger.debug(f"Broadcasting opportunity: {data.get('token_symbol')} - Liquidity: {data.get('liquidity_usd')} (type: {type(data.get('liquidity_usd'))})")
-                
-            message_str = json.dumps(message)
-        except Exception as json_error:
-            self.logger.error(f"Error serializing message: {json_error}")
-            self.logger.error(f"Message content: {message}")
-            return
+            # Update client count in stats
+            self.stats["connected_clients"] = len(self.connected_clients)
+            
+            # Add timestamp if not present
+            if "timestamp" not in message:
+                message["timestamp"] = datetime.now().isoformat()
+            
+            # Convert to JSON
+            json_message = json.dumps(message)
+            
+            # Send to all clients (with error handling)
+            failed_clients = []
+            for client in self.connected_clients.copy():
+                try:
+                    await asyncio.wait_for(
+                        client.send_text(json_message),
+                        timeout=1.0
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Failed to send message to client: {e}")
+                    failed_clients.append(client)
+            
+            # Remove failed clients
+            for client in failed_clients:
+                if client in self.connected_clients:
+                    self.connected_clients.remove(client)
+            
+            if failed_clients:
+                self.logger.debug(f"Removed {len(failed_clients)} disconnected clients")
+            
+        except Exception as e:
+            self.logger.error(f"Error broadcasting message: {e}")
+
+    async def handle_websocket_connection(self, websocket: WebSocket) -> None:
+        """
+        Handle a WebSocket connection lifecycle.
         
-        for client in self.connected_clients.copy():
-            try:
-                # Check if client is still connected using multiple methods
-                client_disconnected = False
-                
-                # Method 1: Check client_state if available
-                if hasattr(client, 'client_state'):
-                    try:
-                        # WebSocket states: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
-                        if client.client_state.value in [2, 3]:  # CLOSING or CLOSED
-                            client_disconnected = True
-                    except Exception:
-                        # If we can't check state, assume client might be disconnected
-                        client_disconnected = True
-                
-                # Method 2: Try to send the message
-                if not client_disconnected:
-                    try:
-                        await client.send_text(message_str)
-                    except Exception as send_error:
-                        error_str = str(send_error).lower()
-                        
-                        # Check for specific disconnect indicators
-                        disconnect_indicators = [
-                            'disconnect', 'closed', 'connection', 'reset',
-                            '1001', '1000', '1006',  # WebSocket close codes
-                            'broken pipe', 'connection aborted'
-                        ]
-                        
-                        if any(indicator in error_str for indicator in disconnect_indicators):
-                            self.logger.debug(f"Client disconnected during broadcast: {send_error}")
-                        else:
-                            self.logger.warning(f"Error sending to client: {send_error}")
-                        
-                        client_disconnected = True
-                
-                if client_disconnected:
-                    disconnected_clients.append(client)
+        Args:
+            websocket: WebSocket connection to handle
+        """
+        try:
+            # Accept the connection
+            await websocket.accept()
+            self.connected_clients.append(websocket)
+            
+            client_count = len(self.connected_clients)
+            self.logger.info(f"✅ WebSocket client connected (total: {client_count})")
+            
+            # Send welcome message with current stats
+            welcome_message = {
+                "type": "connection_established",
+                "message": "Connected to DEX Trading Dashboard",
+                "stats": self.stats.copy(),
+                "server_status": "running" if self.is_running else "stopping"
+            }
+            await websocket.send_text(json.dumps(welcome_message))
+            
+            # Send recent opportunities if any
+            if self.opportunities_queue:
+                recent_opportunities = self.opportunities_queue[-10:]  # Last 10
+                for opportunity in recent_opportunities:
+                    await self._send_opportunity_to_client(websocket, opportunity)
+            
+            # Handle incoming messages
+            await self._handle_client_messages(websocket)
+            
+        except WebSocketDisconnect:
+            self.logger.debug("WebSocket client disconnected normally")
+        except ConnectionResetError:
+            self.logger.debug("WebSocket connection reset by client")
+        except Exception as e:
+            self.logger.error(f"WebSocket connection error: {e}")
+        finally:
+            # Clean up connection
+            if websocket in self.connected_clients:
+                self.connected_clients.remove(websocket)
+            
+            remaining_clients = len(self.connected_clients)
+            self.logger.debug(f"WebSocket cleanup complete (remaining: {remaining_clients})")
+
+    async def _handle_client_messages(self, websocket: WebSocket) -> None:
+        """
+        Handle incoming messages from a WebSocket client.
+        
+        Args:
+            websocket: WebSocket connection
+        """
+        try:
+            while self.is_running and websocket in self.connected_clients:
+                try:
+                    # Receive message with timeout
+                    message = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
                     
-            except Exception as e:
-                self.logger.warning(f"Error processing client during broadcast: {e}")
-                disconnected_clients.append(client)
+                    # Parse JSON
+                    try:
+                        data = json.loads(message)
+                        await self._process_client_message(websocket, data)
+                    except json.JSONDecodeError as json_error:
+                        self.logger.warning(f"Invalid JSON from client: {json_error}")
+                        await websocket.send_text(json.dumps({
+                            "type": "error",
+                            "message": "Invalid JSON format"
+                        }))
+                        
+                except asyncio.TimeoutError:
+                    # Send heartbeat on timeout
+                    await websocket.send_text(json.dumps({"type": "heartbeat"}))
+                    
+                except WebSocketDisconnect:
+                    self.logger.debug("Client disconnected during message handling")
+                    break
+                    
+                except Exception as e:
+                    self.logger.error(f"Error handling client message: {e}")
+                    break
+                    
+        except Exception as e:
+            self.logger.error(f"Error in client message handler: {e}")
+
+    async def _process_client_message(self, websocket: WebSocket, data: Dict[str, Any]) -> None:
+        """
+        Process a message from a WebSocket client.
         
-        # Remove disconnected clients
-        for client in disconnected_clients:
-            if client in self.connected_clients:
-                self.connected_clients.remove(client)
+        Args:
+            websocket: WebSocket connection
+            data: Parsed message data
+        """
+        try:
+            message_type = data.get("type", "unknown")
+            
+            if message_type == "get_stats":
+                # Send current statistics
+                await websocket.send_text(json.dumps({
+                    "type": "stats_response",
+                    "stats": self.stats.copy()
+                }))
                 
-        if disconnected_clients:
-            self.logger.debug(f"Removed {len(disconnected_clients)} disconnected clients during broadcast")
+            elif message_type == "get_opportunities":
+                # Send recent opportunities
+                recent_count = data.get("count", 10)
+                recent_opportunities = self.opportunities_queue[-recent_count:]
+                
+                for opportunity in recent_opportunities:
+                    await self._send_opportunity_to_client(websocket, opportunity)
+                    
+            elif message_type == "heartbeat":
+                # Respond to heartbeat
+                await websocket.send_text(json.dumps({"type": "heartbeat_response"}))
+                
+            else:
+                self.logger.debug(f"Unknown message type from client: {message_type}")
+                
+        except Exception as e:
+            self.logger.error(f"Error processing client message: {e}")
+
+    async def _send_opportunity_to_client(self, websocket: WebSocket, opportunity: TradingOpportunity) -> None:
+        """
+        Send an opportunity to a specific client.
+        
+        Args:
+            websocket: WebSocket connection
+            opportunity: Trading opportunity to send
+        """
+        try:
+            message = {
+                "type": "new_opportunity",
+                "data": {
+                    "symbol": opportunity.token_info.symbol,
+                    "name": opportunity.token_info.name,
+                    "address": opportunity.token_info.address,
+                    "chain": opportunity.token_info.chain,
+                    "confidence_score": float(opportunity.confidence_score),
+                    "risk_level": opportunity.risk_level.value,
+                    "detected_at": opportunity.detected_at.isoformat(),
+                    "source": opportunity.source
+                }
+            }
+            
+            await websocket.send_text(json.dumps(message))
+            
+        except Exception as e:
+            self.logger.error(f"Error sending opportunity to client: {e}")
 
     async def add_opportunity(self, opportunity: TradingOpportunity) -> None:
         """
         Add a new trading opportunity and broadcast to clients.
         
         Args:
-            opportunity: The trading opportunity to add
-            
-        Raises:
-            Exception: If opportunity processing fails
+            opportunity: New trading opportunity
         """
         try:
-            # Add to queue (keep last 100)
+            # Add to queue (keep last 100 opportunities)
             self.opportunities_queue.append(opportunity)
             if len(self.opportunities_queue) > 100:
                 self.opportunities_queue.pop(0)
-                
-            # Update stats
+            
+            # Update statistics
             self.stats["total_opportunities"] += 1
-            
-            # Extract recommendation safely
-            recommendation = opportunity.metadata.get("recommendation", {})
-            if recommendation.get("confidence") == "HIGH":
+            if opportunity.confidence_score >= 80:
                 self.stats["high_confidence"] += 1
-                
-            # Create safe opportunity data for broadcast with proper value extraction
-            try:
-                # Safely extract liquidity USD value
-                liquidity_usd = 0.0
-                if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
-                    if hasattr(opportunity.liquidity, 'liquidity_usd') and opportunity.liquidity.liquidity_usd:
-                        liquidity_usd = float(opportunity.liquidity.liquidity_usd)
-                
-                # Safely extract DEX name
-                dex_name = "Unknown DEX"
-                if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
-                    if hasattr(opportunity.liquidity, 'dex_name') and opportunity.liquidity.dex_name:
-                        dex_name = str(opportunity.liquidity.dex_name)
-                
-                # Safely extract pair address
-                pair_address = ""
-                if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
-                    if hasattr(opportunity.liquidity, 'pair_address') and opportunity.liquidity.pair_address:
-                        pair_address = str(opportunity.liquidity.pair_address)
-                
-                # Safely extract token info
-                token_symbol = "UNKNOWN"
-                token_address = ""
-                if hasattr(opportunity, 'token') and opportunity.token:
-                    token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN') or 'UNKNOWN'
-                    token_address = getattr(opportunity.token, 'address', '') or ''
-                
-                # Safely extract chain
-                chain = opportunity.metadata.get('chain', 'ethereum').lower()
-                
-                # Safely extract risk level
-                risk_level = opportunity.metadata.get('risk_level', 'unknown')
-                
-                # Safely extract scores
-                score = 0.0
-                try:
-                    if "score" in recommendation:
-                        score = float(recommendation["score"])
-                    elif "trading_score" in opportunity.metadata:
-                        trading_score = opportunity.metadata["trading_score"]
-                        if isinstance(trading_score, dict) and "overall_score" in trading_score:
-                            score = float(trading_score["overall_score"])
-                        else:
-                            score = float(trading_score)
-                except Exception:
-                    score = 0.0
-                
-                # Create broadcast data
-                broadcast_data = {
-                    "token_symbol": token_symbol,
-                    "token_address": token_address,
-                    "chain": chain,
-                    "risk_level": risk_level,
-                    "recommendation": recommendation.get("action", "MONITOR"),
-                    "confidence": recommendation.get("confidence", "LOW"),
-                    "score": score,
-                    "liquidity_usd": liquidity_usd,
-                    "dex_name": dex_name,
-                    "pair_address": pair_address,
-                    "detected_at": datetime.now().isoformat(),
-                    "age_minutes": 0
-                }
-                
-                # Broadcast to connected clients
-                await self.broadcast_message({
+            
+            # Broadcast to all clients
+            if self.connected_clients and self.is_running:
+                message = {
                     "type": "new_opportunity",
-                    "data": broadcast_data
-                })
-                
-                self.logger.debug(f"✅ Opportunity added and broadcast: {token_symbol}")
-                
-            except Exception as broadcast_error:
-                self.logger.error(f"Failed to broadcast opportunity: {broadcast_error}")
-                # Don't raise - still want to add to queue even if broadcast fails
-                
-        except Exception as e:
-            self.logger.error(f"Failed to add opportunity: {e}")
-            raise
-
-    async def update_analysis_rate(self, rate: int) -> None:
-        """
-        Update the analysis rate statistic.
-        
-        Args:
-            rate: New analysis rate value
-        """
-        try:
-            self.stats["analysis_rate"] = rate
-            
-            # Broadcast updated stats
-            await self.broadcast_message({
-                "type": "stats_update",
-                "data": {
-                    "analysis_rate": rate,
-                    "total_opportunities": self.stats["total_opportunities"],
-                    "high_confidence": self.stats["high_confidence"]
-                }
-            })
-        except Exception as e:
-            self.logger.error(f"Error updating analysis rate: {e}")
-
-    async def add_token_to_watchlist(self, request: WatchlistAddRequest) -> bool:
-        """
-        Add a token to the watchlist with proper opportunity creation.
-        
-        Args:
-            request: Watchlist addition request
-            
-        Returns:
-            True if added successfully, False if already exists
-            
-        Raises:
-            Exception: If watchlist addition fails
-        """
-        try:
-            # Create opportunity object for watchlist
-            token_address = request.token_address
-            chain = request.chain.upper()
-            
-            # Handle different address formats for different chains
-            if 'SOLANA' in chain:
-                # For Solana, create a custom token object that bypasses validation
-                token_info = type('SolanaTokenInfo', (), {
-                    'address': token_address,
-                    'symbol': request.token_symbol,
-                    'name': request.token_symbol,
-                    'decimals': 6,
-                    'total_supply': 1000000000
-                })()
-            else:
-                # For EVM chains, use the regular TokenInfo with validation
-                token_info = TokenInfo(
-                    address=token_address,
-                    symbol=request.token_symbol,
-                    name=request.token_symbol
-                )
-            
-            liquidity_info = LiquidityInfo(
-                pair_address='',
-                dex_name='Unknown',
-                token0=token_address,
-                token1='',
-                reserve0=0.0,
-                reserve1=0.0,
-                liquidity_usd=0.0,
-                created_at=datetime.now(),
-                block_number=0
-            )
-            
-            opportunity = TradingOpportunity(
-                token=token_info,
-                liquidity=liquidity_info,
-                contract_analysis=ContractAnalysis(),
-                social_metrics=SocialMetrics()
-            )
-            
-            opportunity.metadata['chain'] = chain
-            
-            success = watchlist_manager.add_to_watchlist(
-                opportunity=opportunity,
-                reason=request.reason,
-                target_price=request.target_price,
-                stop_loss=request.stop_loss,
-                notes=request.notes
-            )
-            
-            if success:
-                # Broadcast to connected clients
-                await self.broadcast_message({
-                    "type": "watchlist_updated",
                     "data": {
-                        "action": "added",
-                        "token_symbol": request.token_symbol,
-                        "token_address": token_address
+                        "symbol": opportunity.token_info.symbol,
+                        "name": opportunity.token_info.name,
+                        "address": opportunity.token_info.address,
+                        "chain": opportunity.token_info.chain,
+                        "confidence_score": float(opportunity.confidence_score),
+                        "risk_level": opportunity.risk_level.value,
+                        "detected_at": opportunity.detected_at.isoformat(),
+                        "source": opportunity.source
                     }
-                })
+                }
                 
-            return success
+                await self.broadcast_message(message)
             
         except Exception as e:
-            self.logger.error(f"Error adding to watchlist: {e}")
-            raise
+            self.logger.error(f"Error adding opportunity: {e}")
 
-    async def handle_websocket_connection(self, websocket: WebSocket) -> None:
+    async def update_metrics(self, metrics: Dict[str, Any]) -> None:
         """
-        Handle a new WebSocket connection with comprehensive error handling.
+        Update dashboard metrics.
         
         Args:
-            websocket: The WebSocket connection to handle
+            metrics: New metrics to update
         """
-        await websocket.accept()
-        self.connected_clients.append(websocket)
-        self.logger.info(f"WebSocket client connected. Total: {len(self.connected_clients)}")
-        
         try:
-            # Send initial connection confirmation
-            await websocket.send_text(json.dumps({
-                "type": "connected",
-                "message": "WebSocket connection established"
-            }))
+            # Update statistics
+            self.stats.update(metrics)
+            self.stats["connected_clients"] = len(self.connected_clients)
             
-            while True:
-                try:
-                    # Use receive_json with timeout to handle disconnects gracefully
-                    message = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
-                    
-                    # Handle different message types
-                    if message.get("type") == "ping":
-                        await websocket.send_text(json.dumps({"type": "pong"}))
-                    elif message.get("type") == "subscribe":
-                        await websocket.send_text(json.dumps({
-                            "type": "subscribed",
-                            "message": "Successfully subscribed to updates"
-                        }))
-                        
-                except asyncio.TimeoutError:
-                    # Send ping to keep connection alive
-                    try:
-                        await websocket.send_text(json.dumps({"type": "ping"}))
-                    except Exception:
-                        # If we can't send ping, connection is dead
-                        self.logger.debug("WebSocket ping failed - connection closed")
-                        break
-                        
-                except json.JSONDecodeError as json_error:
-                    self.logger.warning(f"Invalid JSON from WebSocket client: {json_error}")
-                    try:
-                        await websocket.send_text(json.dumps({
-                            "type": "error",
-                            "message": "Invalid JSON format"
-                        }))
-                    except Exception:
-                        # If we can't send error message, connection is dead
-                        self.logger.debug("WebSocket error response failed - connection closed")
-                        break
-                        
-                except Exception as message_error:
-                    # Handle specific WebSocket close codes
-                    error_str = str(message_error)
-                    
-                    # Check for WebSocket close codes
-                    if "(1001," in error_str:
-                        self.logger.debug("WebSocket client going away (1001) - tab closed/refreshed")
-                        break
-                    elif "(1000," in error_str:
-                        self.logger.debug("WebSocket client closed normally (1000)")
-                        break
-                    elif "(1006," in error_str:
-                        self.logger.debug("WebSocket connection closed abnormally (1006)")
-                        break
-                    
-                    # Check for other disconnect-related errors
-                    error_msg = error_str.lower()
-                    disconnect_keywords = [
-                        'disconnect', 'closed', 'connection', 'reset', 
-                        'broken pipe', 'connection aborted', 'connection reset'
-                    ]
-                    
-                    if any(keyword in error_msg for keyword in disconnect_keywords):
-                        self.logger.debug(f"WebSocket connection terminated: {message_error}")
-                        break
-                    else:
-                        self.logger.error(f"WebSocket message processing error: {message_error}")
-                        # Continue the loop for non-disconnect errors
-                    
-        except WebSocketDisconnect as disconnect_error:
-            # This is the normal FastAPI WebSocket disconnect exception
-            self.logger.debug(f"WebSocket client disconnected normally: {disconnect_error}")
-        except ConnectionResetError:
-            self.logger.debug("WebSocket connection reset by client")
-        except ConnectionAbortedError:
-            self.logger.debug("WebSocket connection aborted")
+            # Broadcast metrics update to clients
+            if self.connected_clients and self.is_running:
+                await self.broadcast_message({
+                    "type": "metrics_update",
+                    "metrics": self.stats.copy()
+                })
+                
         except Exception as e:
-            # Log unexpected errors but don't let them crash the system
-            error_str = str(e)
-            if any(code in error_str for code in ['1001', '1000', '1006']):
-                self.logger.debug(f"WebSocket closed with code: {e}")
-            else:
-                self.logger.warning(f"Unexpected WebSocket error: {e}")
-        finally:
-            # Always clean up the client connection
-            if websocket in self.connected_clients:
-                self.connected_clients.remove(websocket)
-            self.logger.debug(f"WebSocket cleanup complete. Remaining clients: {len(self.connected_clients)}")
-    
+            self.logger.error(f"Error updating metrics: {e}")
+
     async def _periodic_cleanup_task(self) -> None:
         """
         Periodic task to clean up dead WebSocket connections.
         
-        Raises:
-            Exception: If cleanup task fails critically
+        Runs while the server is active and cleans up disconnected clients.
         """
-        while True:
-            try:
-                await asyncio.sleep(30)  # Clean up every 30 seconds
-                await self._cleanup_dead_connections()
-            except Exception as e:
-                self.logger.error(f"Error in periodic cleanup: {e}")
-                await asyncio.sleep(60)
+        try:
+            while self.is_running:
+                try:
+                    await asyncio.sleep(30)  # Clean up every 30 seconds
+                    await self._cleanup_dead_connections()
+                except Exception as e:
+                    self.logger.error(f"Error in periodic cleanup: {e}")
+                    await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.logger.debug("Periodic cleanup task cancelled")
     
     async def _cleanup_dead_connections(self) -> None:
         """
         Clean up dead WebSocket connections.
         
-        Raises:
-            Exception: If cleanup fails critically
+        Identifies and removes disconnected clients from the active list.
         """
         try:
             if not self.connected_clients:
@@ -470,37 +483,13 @@ class DashboardServer:
             
             for client in self.connected_clients.copy():
                 try:
-                    # Check multiple indicators of disconnected state
-                    is_dead = False
-                    
-                    # Check client_state if available
-                    if hasattr(client, 'client_state'):
-                        try:
-                            # WebSocket states: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
-                            if client.client_state.value in [2, 3]:  # CLOSING or CLOSED
-                                is_dead = True
-                        except Exception:
-                            # If we can't read the state, consider it potentially dead
-                            is_dead = True
-                    
-                    # Additional check: try to send a ping
-                    if not is_dead:
-                        try:
-                            # Send a very small message to test connection
-                            await asyncio.wait_for(
-                                client.send_text(json.dumps({"type": "heartbeat"})), 
-                                timeout=1.0
-                            )
-                        except Exception:
-                            # If ping fails, connection is dead
-                            is_dead = True
-                    
-                    if is_dead:
-                        dead_clients.append(client)
-                        
-                except Exception as check_error:
-                    # If we can't check the client, assume it's dead
-                    self.logger.debug(f"Error checking client state: {check_error}")
+                    # Test connection with a heartbeat
+                    await asyncio.wait_for(
+                        client.send_text(json.dumps({"type": "heartbeat"})),
+                        timeout=1.0
+                    )
+                except Exception:
+                    # If heartbeat fails, connection is dead
                     dead_clients.append(client)
             
             # Remove dead clients
@@ -513,6 +502,22 @@ class DashboardServer:
                 
         except Exception as e:
             self.logger.error(f"Error during connection cleanup: {e}")
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Get current dashboard server status.
+        
+        Returns:
+            Dictionary containing server status and statistics
+        """
+        return {
+            "is_running": self.is_running,
+            "connected_clients": len(self.connected_clients),
+            "total_opportunities": self.stats["total_opportunities"],
+            "high_confidence_opportunities": self.stats["high_confidence"],
+            "uptime_start": self.stats["uptime_start"].isoformat(),
+            "server_version": "2.0.0"
+        }
 
 
 # Global dashboard instance

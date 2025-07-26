@@ -151,6 +151,43 @@ class EnhancedTradingSystem:
         self.opportunities_processed = 0
         self.trades_executed = 0
         self.notifications_sent = 0
+        
+        # Analysis statistics
+        self.analysis_stats = {
+            'total_analyzed': 0,
+            'opportunities_found': 0,
+            'high_confidence': 0,
+            'by_chain': {},
+            'by_source': {},
+            'last_update': datetime.now()
+        }
+        
+        # Opportunity tracking by chain
+        self.opportunities_by_chain = {
+            'ethereum': [],
+            'base': [],
+            'solana': [],
+            'total': []
+        }
+        
+        # Signal sources tracking for different opportunity origins
+        self.signal_sources = {
+            'monitors': ['ethereum_monitor', 'base_monitor', 'solana_monitor', 'jupiter_monitor', 'raydium_monitor'],
+            'telegram': ['telegram_signals', 'telegram_channels'],
+            'manual': ['dashboard', 'api'],
+            'active_sources': set()
+        }
+        
+        # Analyzers dictionary for opportunity analysis
+        self.analyzers = {
+            'contract': None,
+            'social': None, 
+            'trading_scorer': None
+        }
+        
+        # Dashboard components
+        self.dashboard_uvicorn_server = None
+        self.dashboard_task = None
 
     async def initialize(self) -> None:
         """
@@ -240,7 +277,10 @@ class EnhancedTradingSystem:
             await self.position_manager.initialize()
             
             # Initialize execution engine
-            self.execution_engine = ExecutionEngine()
+            self.execution_engine = ExecutionEngine(
+                risk_manager=self.risk_manager,
+                position_manager=self.position_manager
+            )
             await self.execution_engine.initialize()
             
             # Initialize trading executor
@@ -248,9 +288,12 @@ class EnhancedTradingSystem:
                 risk_manager=self.risk_manager,
                 position_manager=self.position_manager,
                 execution_engine=self.execution_engine,
-                mode=self.trading_mode,
-                auto_trading_enabled=self.auto_trading_enabled
+                trading_mode=self.trading_mode
             )
+            
+            # Configure auto trading after initialization
+            if hasattr(self.trading_executor, 'auto_execution_enabled'):
+                self.trading_executor.auto_execution_enabled = self.auto_trading_enabled
             
             self.logger.info("✅ Trading system initialized")
             
@@ -270,23 +313,91 @@ class EnhancedTradingSystem:
         try:
             self.logger.info("🔧 Initializing analyzers...")
             
-            # Initialize contract analyzer
-            self.contract_analyzer = ContractAnalyzer()
-            await self.contract_analyzer.initialize()
+            # Initialize Web3 connection for contract analysis
+            w3 = None
+            try:
+                from web3 import Web3
+                # Try multiple RPC endpoints for reliability
+                rpc_urls = [
+                    'https://eth.llamarpc.com',
+                    'https://rpc.ankr.com/eth',
+                    'https://ethereum-rpc.publicnode.com',
+                    getattr(settings.networks, 'ethereum_rpc_url', 'https://eth.public-rpc.com')
+                ]
+                
+                for rpc_url in rpc_urls:
+                    try:
+                        w3 = Web3(Web3.HTTPProvider(rpc_url))
+                        if w3.is_connected():
+                            self.logger.info(f"✅ Web3 connected via {rpc_url}")
+                            break
+                    except Exception as rpc_error:
+                        self.logger.debug(f"RPC {rpc_url} failed: {rpc_error}")
+                        continue
+                
+                if not w3 or not w3.is_connected():
+                    self.logger.warning("❌ Could not establish Web3 connection")
+                    w3 = None
+                    
+            except Exception as web3_error:
+                self.logger.warning(f"Web3 initialization failed: {web3_error}")
+                w3 = None
+            
+            # Initialize contract analyzer (only if Web3 is available)
+            try:
+                if w3:
+                    self.contract_analyzer = ContractAnalyzer(w3)
+                    await self.contract_analyzer.initialize()
+                    self.analyzers['contract'] = self.contract_analyzer
+                    self.logger.info("✅ Contract analyzer initialized")
+                else:
+                    self.contract_analyzer = None
+                    self.analyzers['contract'] = None
+                    self.logger.warning("⚠️ Contract analyzer disabled (no Web3 connection)")
+            except Exception as e:
+                self.logger.warning(f"Contract analyzer initialization failed: {e}")
+                self.contract_analyzer = None
+                self.analyzers['contract'] = None
             
             # Initialize social analyzer
-            self.social_analyzer = SocialAnalyzer()
-            await self.social_analyzer.initialize()
+            try:
+                self.social_analyzer = SocialAnalyzer()
+                await self.social_analyzer.initialize()
+                self.analyzers['social'] = self.social_analyzer
+                self.logger.info("✅ Social analyzer initialized")
+            except Exception as e:
+                self.logger.warning(f"Social analyzer initialization failed: {e}")
+                self.social_analyzer = None
+                self.analyzers['social'] = None
             
             # Initialize trading scorer
-            self.trading_scorer = TradingScorer()
-            await self.trading_scorer.initialize()
+            try:
+                self.trading_scorer = TradingScorer()
+                self.analyzers['trading_scorer'] = self.trading_scorer
+                # TradingScorer doesn't require async initialization
+                self.logger.info("✅ Trading scorer initialized")
+            except Exception as e:
+                self.logger.warning(f"Trading scorer initialization failed: {e}")
+                self.trading_scorer = None
+                self.analyzers['trading_scorer'] = None
             
-            self.logger.info("✅ Analyzers initialized")
+            # Count successful initializations
+            analyzers = [self.contract_analyzer, self.social_analyzer, self.trading_scorer]
+            active_count = len([a for a in analyzers if a is not None])
+            total_count = len(analyzers)
+            
+            self.logger.info(f"✅ Analyzers initialized ({active_count}/{total_count} active)")
+            
+            if active_count == 0:
+                self.logger.warning("⚠️ No analyzers available - running with limited functionality")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize analyzers: {e}")
-            raise
+            # Don't raise - continue without analyzers
+            self.contract_analyzer = None
+            self.social_analyzer = None
+            self.trading_scorer = None
+            self.logger.warning("⚠️ Running without analyzers - basic monitoring only")
 
     async def _initialize_monitors(self) -> None:
         """
@@ -331,30 +442,30 @@ class EnhancedTradingSystem:
 
     async def _setup_opportunity_callbacks(self) -> None:
         """Set up callbacks for opportunity detection from all monitors."""
-        # Connect monitor callbacks to opportunity handler
+        # Connect monitor callbacks to opportunity handler using the correct method names
         if self.new_token_monitor:
-            self.new_token_monitor.add_opportunity_callback(
-                self.opportunity_handler.handle_new_opportunity
+            self.new_token_monitor.add_callback(
+                self.opportunity_handler.handle_opportunity
             )
         
         if self.base_chain_monitor:
-            self.base_chain_monitor.add_opportunity_callback(
-                self.opportunity_handler.handle_new_opportunity
+            self.base_chain_monitor.add_callback(
+                self.opportunity_handler.handle_opportunity
             )
         
         if self.solana_monitor:
-            self.solana_monitor.add_opportunity_callback(
-                self.opportunity_handler.handle_new_opportunity
+            self.solana_monitor.add_callback(
+                self.opportunity_handler.handle_opportunity
             )
         
         if self.jupiter_monitor:
-            self.jupiter_monitor.add_opportunity_callback(
-                self.opportunity_handler.handle_new_opportunity
+            self.jupiter_monitor.add_callback(
+                self.opportunity_handler.handle_opportunity
             )
         
         if self.raydium_monitor:
-            self.raydium_monitor.add_opportunity_callback(
-                self.opportunity_handler.handle_new_opportunity
+            self.raydium_monitor.add_callback(
+                self.opportunity_handler.handle_opportunity
             )
 
     async def _initialize_dashboard(self) -> None:
@@ -369,14 +480,43 @@ class EnhancedTradingSystem:
         try:
             self.logger.info("🔧 Initializing dashboard...")
             
-            # Initialize dashboard server
+            # Initialize dashboard server with trading system reference
             await dashboard_server.initialize(self)
             
+            # Start the FastAPI server in background
+            import uvicorn
+            
+            # Import the FastAPI app
+            from api.dashboard_server import app
+            
+            # Create server config
+            config = uvicorn.Config(
+                app=app,
+                host="0.0.0.0",
+                port=8000,
+                log_level="warning",  # Reduce uvicorn log noise
+                access_log=False
+            )
+            
+            # Create and store server instance
+            self.dashboard_uvicorn_server = uvicorn.Server(config)
+            
+            # Start server in background task
+            self.dashboard_task = asyncio.create_task(
+                self.dashboard_uvicorn_server.serve()
+            )
+            
+            # Give it a moment to start
+            await asyncio.sleep(1)
+            
             self.logger.info("✅ Dashboard initialized")
+            self.logger.info("   🌐 Access at: http://localhost:8000")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize dashboard: {e}")
-            raise
+            # Don't raise - continue without dashboard
+            self.dashboard_uvicorn_server = None
+            self.dashboard_task = None
 
     async def start(self) -> None:
         """
@@ -481,12 +621,30 @@ class EnhancedTradingSystem:
                     self.logger.error(f"Error stopping system monitoring: {e}")
             
             # Stop dashboard
-            if not self.disable_dashboard and dashboard_server:
-                await dashboard_server.stop()
+            if not self.disable_dashboard:
+                try:
+                    if self.dashboard_uvicorn_server:
+                        self.dashboard_uvicorn_server.should_exit = True
+                    if self.dashboard_task and not self.dashboard_task.done():
+                        self.dashboard_task.cancel()
+                        try:
+                            await self.dashboard_task
+                        except asyncio.CancelledError:
+                            pass
+                    await dashboard_server.stop()
+                    self.logger.info("✅ Dashboard stopped")
+                except Exception as e:
+                    self.logger.error(f"Error stopping dashboard: {e}")
             
             # Stop telegram components
             if self.telegram_manager:
-                await self.telegram_manager.shutdown()
+                try:
+                    await self.telegram_manager.shutdown()
+                except Exception as e:
+                    self.logger.error(f"Error stopping telegram manager: {e}")
+            
+            # Cleanup any remaining async sessions
+            await self._cleanup_async_sessions()
             
             # Close trading positions if configured
             if self.position_manager and settings.get('close_positions_on_shutdown', False):
@@ -590,6 +748,237 @@ class EnhancedTradingSystem:
         test_opportunities.append(sol_opportunity)
         
         return test_opportunities
+
+    async def _cleanup_async_sessions(self) -> None:
+        """
+        Cleanup any remaining aiohttp sessions to prevent warnings.
+        
+        Ensures all HTTP sessions are properly closed during shutdown.
+        """
+        try:
+            self.logger.debug("🧹 Cleaning up HTTP sessions...")
+            
+            # Close sessions in analyzers
+            analyzers = [self.contract_analyzer, self.social_analyzer]
+            for analyzer in analyzers:
+                if analyzer and hasattr(analyzer, 'session') and analyzer.session:
+                    try:
+                        if not analyzer.session.closed:
+                            await analyzer.session.close()
+                    except Exception:
+                        pass
+            
+            # Close sessions in monitors
+            monitors = [
+                self.new_token_monitor,
+                self.base_chain_monitor, 
+                self.solana_monitor,
+                self.jupiter_monitor,
+                self.raydium_monitor
+            ]
+            
+            for monitor in monitors:
+                if monitor and hasattr(monitor, 'session') and monitor.session:
+                    try:
+                        if not monitor.session.closed:
+                            await monitor.session.close()
+                    except Exception:
+                        pass
+            
+            # Give time for cleanup to complete
+            await asyncio.sleep(0.1)
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            self.logger.debug("✅ HTTP session cleanup completed")
+            
+        except Exception as e:
+            self.logger.debug(f"Session cleanup error (non-critical): {e}")
+
+    async def run_with_signal_handling(self) -> None:
+        """
+        Run the trading system with proper signal handling.
+        
+        This method provides the main entry point for running the system
+        with graceful shutdown on Ctrl+C and other signals.
+        """
+        import signal
+        
+        try:
+            # Set up signal handlers for graceful shutdown
+            def signal_handler(signum, frame):
+                signal_name = signal.Signals(signum).name
+                self.logger.info(f"🛑 Received {signal_name} signal, initiating shutdown...")
+                self.shutdown_requested = True
+                
+                # Create shutdown task if we're in an event loop
+                try:
+                    loop = asyncio.get_running_loop()
+                    if not loop.is_closed():
+                        loop.create_task(self.shutdown())
+                except RuntimeError:
+                    self.logger.warning("No event loop running, forcing exit...")
+                    import sys
+                    sys.exit(0)
+            
+            # Register signal handlers
+            signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+            signal.signal(signal.SIGTERM, signal_handler)  # Termination request
+            
+            if sys.platform != "win32":
+                # Unix-specific signals
+                signal.signal(signal.SIGHUP, signal_handler)   # Hangup
+                signal.signal(signal.SIGQUIT, signal_handler)  # Quit
+            
+            self.logger.info("✅ Signal handlers registered (Ctrl+C will work gracefully)")
+            
+            # Initialize the system
+            await self.initialize()
+            
+            # Send startup notification
+            if self.telegram_manager.notifications_enabled:
+                await self.telegram_manager.send_system_startup()
+            
+            # Start all monitors
+            self.logger.info("🚀 Starting all monitoring systems...")
+            self.running = True
+            
+            monitor_tasks = []
+            
+            # Start monitors if they exist
+            monitors = [
+                self.new_token_monitor,
+                self.base_chain_monitor,
+                self.solana_monitor,
+                self.jupiter_monitor,
+                self.raydium_monitor
+            ]
+            
+            for monitor in monitors:
+                if monitor:
+                    try:
+                        task = asyncio.create_task(monitor.start())
+                        monitor_tasks.append(task)
+                        self.logger.info(f"✅ {monitor.__class__.__name__} started")
+                    except Exception as e:
+                        self.logger.error(f"Failed to start {monitor.__class__.__name__}: {e}")
+            
+            # Start system monitoring
+            if self.system_monitoring:
+                try:
+                    monitoring_task = asyncio.create_task(self.system_monitoring.start())
+                    monitor_tasks.append(monitoring_task)
+                    self.logger.info("✅ System monitoring started")
+                except Exception as e:
+                    self.logger.error(f"Failed to start system monitoring: {e}")
+            
+            # Start dashboard if enabled
+            if not self.disable_dashboard:
+                try:
+                    # Dashboard server doesn't have start() method, it's initialized in _initialize_dashboard
+                    # Just log that it's available
+                    self.logger.info("✅ Dashboard server available at http://localhost:8000")
+                except Exception as e:
+                    self.logger.error(f"Dashboard server error: {e}")
+            
+            self.logger.info(f"🎯 System running with {len(monitor_tasks)} active components")
+            self.logger.info("💡 Press Ctrl+C to stop the system gracefully")
+            
+            # Main system loop
+            try:
+                while self.running and not self.shutdown_requested:
+                    await asyncio.sleep(1)
+                    
+                    # Check if any critical tasks have failed
+                    failed_tasks = [task for task in monitor_tasks if task.done() and task.exception()]
+                    if failed_tasks:
+                        self.logger.warning(f"Detected {len(failed_tasks)} failed tasks")
+                        for task in failed_tasks:
+                            try:
+                                self.logger.error(f"Task failed: {task.exception()}")
+                            except Exception:
+                                pass
+                
+                self.logger.info("🛑 Main loop stopping...")
+                
+            except KeyboardInterrupt:
+                self.logger.info("🛑 KeyboardInterrupt received")
+            
+            # Cancel all monitor tasks
+            self.logger.info("Stopping all monitor tasks...")
+            for task in monitor_tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for tasks to complete cancellation
+            if monitor_tasks:
+                await asyncio.gather(*monitor_tasks, return_exceptions=True)
+            
+            self.logger.info("✅ All monitor tasks stopped")
+            
+        except Exception as e:
+            self.logger.error(f"💥 Error in main run loop: {e}")
+            raise
+        finally:
+            # Ensure cleanup happens
+            try:
+                await self.shutdown()
+            except Exception as e:
+                self.logger.error(f"Error during final shutdown: {e}")
+
+    async def start(self) -> None:
+        """
+        Alternative start method for simpler usage.
+        
+        This is an alias for run_with_signal_handling for compatibility.
+        """
+        await self.run_with_signal_handling()
+
+    def update_analysis_stats(self, opportunity) -> None:
+        """
+        Update analysis statistics for tracking.
+        
+        Args:
+            opportunity: The trading opportunity being processed
+        """
+        try:
+            # Update basic stats
+            self.analysis_stats['total_analyzed'] += 1
+            self.analysis_stats['opportunities_found'] += 1
+            self.analysis_stats['last_update'] = datetime.now()
+            
+            # Track by chain
+            chain = getattr(opportunity, 'chain', 'unknown')
+            if hasattr(opportunity, 'metadata') and opportunity.metadata:
+                chain = opportunity.metadata.get('chain', chain)
+            
+            if chain not in self.analysis_stats['by_chain']:
+                self.analysis_stats['by_chain'][chain] = 0
+            self.analysis_stats['by_chain'][chain] += 1
+            
+            # Track by source
+            source = getattr(opportunity, 'source', 'unknown')
+            if hasattr(opportunity, 'metadata') and opportunity.metadata:
+                source = opportunity.metadata.get('source', source)
+            
+            if source not in self.analysis_stats['by_source']:
+                self.analysis_stats['by_source'][source] = 0
+            self.analysis_stats['by_source'][source] += 1
+            
+            # Track high confidence opportunities
+            confidence_score = 0
+            if hasattr(opportunity, 'confidence_score'):
+                confidence_score = float(opportunity.confidence_score)
+            elif hasattr(opportunity, 'metadata') and opportunity.metadata:
+                confidence_score = opportunity.metadata.get('confidence_score', 0)
+            
+            if confidence_score >= 80:
+                self.analysis_stats['high_confidence'] += 1
+                
+        except Exception as e:
+            self.logger.debug(f"Error updating analysis stats: {e}")
 
     def get_system_status(self) -> Dict[str, Any]:
         """

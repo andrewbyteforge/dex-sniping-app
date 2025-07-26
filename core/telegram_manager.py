@@ -504,6 +504,51 @@ class TelegramManager:
         except Exception as e:
             self.logger.error(f"Error sending daily summary: {e}")
 
+    async def handle_new_opportunity(self, opportunity) -> None:
+        """
+        Handle new trading opportunity notification.
+        
+        Args:
+            opportunity: TradingOpportunity object to process
+        """
+        try:
+            if not self.notifications_enabled:
+                return
+            
+            # Forward to the main opportunity alert handler
+            await self.send_opportunity_alert(opportunity)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling new opportunity: {e}")
+
+    async def handle_opportunity_error(self, error_message: str, opportunity=None) -> None:
+        """
+        Handle opportunity processing errors.
+        
+        Args:
+            error_message: Description of the error
+            opportunity: The opportunity that caused the error (optional)
+        """
+        try:
+            self.statistics['notification_errors'] += 1
+            
+            # Log the error
+            self.logger.error(f"Opportunity processing error: {error_message}")
+            
+            # Send error notification if it's critical
+            if self.notifications_enabled and "critical" in error_message.lower():
+                await self.send_error_notification(
+                    error_type="Opportunity Processing Error",
+                    error_message=error_message,
+                    details={
+                        'opportunity_symbol': getattr(opportunity, 'token_info', {}).get('symbol', 'Unknown') if opportunity else 'Unknown',
+                        'timestamp': datetime.now().isoformat()
+                    }
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Error handling opportunity error: {e}")
+
     async def send_error_notification(self, error_type: str, error_message: str, details: Optional[Dict[str, Any]] = None) -> None:
         """
         Send error notification.
