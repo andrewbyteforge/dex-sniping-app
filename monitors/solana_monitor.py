@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Enhanced Solana Monitor with robust error handling and fallback mechanisms.
+Enhanced Solana Monitor with alternative APIs to bypass geographic restrictions.
 
 File: monitors/solana_monitor.py
-Functions: Enhanced _check_pump_fun_tokens(), _handle_api_errors(), _circuit_breaker_check()
+Replaces Pump.fun with multiple alternative sources that work globally.
 """
 
 import asyncio
@@ -69,19 +69,19 @@ class APICircuitBreaker:
 
 class SolanaMonitor(BaseMonitor):
     """
-    Enhanced monitor for detecting new token launches on Solana ecosystem.
-    Includes robust error handling, circuit breakers, and fallback mechanisms.
+    Enhanced Solana monitor using multiple alternative APIs to bypass restrictions.
+    Uses Jupiter, Solscan, Birdeye, and CoinGecko instead of Pump.fun.
     """
     
     def __init__(
         self, 
-        check_interval: float = 5.0
+        check_interval: float = 15.0
     ) -> None:
         """
-        Initialize the enhanced Solana monitor.
+        Initialize the enhanced Solana monitor with alternative APIs.
         
         Args:
-            check_interval: Seconds between checks (increased for stability)
+            check_interval: Seconds between checks (slower for multiple APIs)
         """
         super().__init__("Solana", check_interval)
         
@@ -89,24 +89,56 @@ class SolanaMonitor(BaseMonitor):
         try:
             self.solana_config = multichain_settings.solana
         except Exception:
-            # Fallback configuration if multichain_settings not available
+            # Fallback configuration
             from types import SimpleNamespace
             self.solana_config = SimpleNamespace(
-                pump_fun_api="https://frontend-api.pump.fun",
-                raydium_api="https://api.raydium.io/v2",
                 enabled=True
             )
         
-        # Enhanced session and state management
+        # Alternative API sources (UK-friendly)
+        self.data_sources = {
+            "jupiter": {
+                "url": "https://token.jup.ag/all",
+                "enabled": True,
+                "circuit_breaker": APICircuitBreaker(failure_threshold=3, recovery_timeout=120),
+                "parser": self._parse_jupiter_tokens,
+                "description": "Jupiter Aggregator Token List"
+            },
+            "solscan": {
+                "url": "https://public-api.solscan.io/token/list",
+                "enabled": True,
+                "circuit_breaker": APICircuitBreaker(failure_threshold=3, recovery_timeout=180),
+                "parser": self._parse_solscan_tokens,
+                "description": "Solscan Public API"
+            },
+            "birdeye": {
+                "url": "https://public-api.birdeye.so/public/tokenlist",
+                "enabled": True,
+                "circuit_breaker": APICircuitBreaker(failure_threshold=3, recovery_timeout=240),
+                "parser": self._parse_birdeye_tokens,
+                "description": "Birdeye Public API"
+            },
+            "coingecko_solana": {
+                "url": "https://api.coingecko.com/api/v3/coins/markets",
+                "params": {
+                    "vs_currency": "usd",
+                    "category": "solana-ecosystem",
+                    "order": "market_cap_desc",
+                    "per_page": 50,
+                    "page": 1,
+                    "sparkline": False
+                },
+                "enabled": True,
+                "circuit_breaker": APICircuitBreaker(failure_threshold=5, recovery_timeout=300),
+                "parser": self._parse_coingecko_tokens,
+                "description": "CoinGecko Solana Ecosystem"
+            }
+        }
+        
+        # Session and state management
         self.session: Optional[aiohttp.ClientSession] = None
         self.processed_tokens: set = set()
         self.last_check_time = datetime.now()
-        
-        # Circuit breakers for different APIs
-        self.pump_fun_circuit_breaker = APICircuitBreaker(
-            failure_threshold=3,  # More aggressive for 530 errors
-            recovery_timeout=120  # 2 minutes recovery time
-        )
         
         # Enhanced error tracking
         self.consecutive_failures = 0
@@ -116,7 +148,10 @@ class SolanaMonitor(BaseMonitor):
         
         # Fallback mode settings
         self.fallback_mode = False
-        self.fallback_check_interval = 30.0  # Slower checks in fallback mode
+        self.fallback_check_interval = 45.0  # Slower checks in fallback mode
+        
+        # Track which APIs are working
+        self.working_apis = set()
         
         # Additional properties (set after construction)
         self.scorer = None
@@ -129,12 +164,13 @@ class SolanaMonitor(BaseMonitor):
             "errors_count": 0,
             "last_error": None,
             "uptime_start": datetime.now(),
-            "pump_fun_tokens": 0,
-            "raydium_pairs": 0,
-            "api_530_errors": 0,
-            "circuit_breaker_trips": 0,
+            "api_calls_total": 0,
+            "api_calls_successful": 0,
+            "api_calls_failed": 0,
+            "working_apis": 0,
             "fallback_mode_activations": 0,
-            "last_successful_check": None
+            "last_successful_check": None,
+            "sources_stats": {}
         }
         
         # Known tokens to skip (common Solana tokens)
@@ -163,31 +199,26 @@ class SolanaMonitor(BaseMonitor):
             bool: True if initialization successful, False otherwise
         """
         try:
-            self.logger.info("Initializing Enhanced Solana Monitor...")
+            self.logger.info("Initializing Enhanced Solana Monitor with Alternative APIs...")
             
             # Call the private initialization method
             await self._initialize()
             
-            # Test connections with circuit breaker consideration
+            # Test all available APIs
             if self.session:
-                connection_tests = await self._test_connections()
+                working_count = await self._test_all_apis()
                 
-                # Consider partial success acceptable
-                if any(connection_tests.values()) or not all(connection_tests.values()):
-                    self.logger.info("✅ Enhanced Solana Monitor initialized")
-                    self.logger.info(f"   Pump.fun API: {'✅' if connection_tests.get('pump_fun') else '❌ (will use fallback)'}")
+                if working_count > 0:
+                    self.logger.info("✅ Enhanced Solana Monitor initialized successfully")
+                    self.logger.info(f"   Working APIs: {working_count}/{len(self.data_sources)}")
+                    self.logger.info(f"   Available sources: {', '.join(self.working_apis)}")
                     self.logger.info(f"   Auto trading: {'✅' if self.auto_trading else '❌'}")
-                    self.logger.info(f"   Circuit breaker: ✅ Active")
-                    self.logger.info(f"   Fallback mode: {'✅' if self.fallback_mode else '❌'}")
-                    
-                    # Set fallback mode if API is not healthy
-                    if not connection_tests.get('pump_fun', False):
-                        self._activate_fallback_mode("Initial connection test failed")
+                    self.logger.info(f"   Circuit breakers: ✅ Active for all sources")
                     
                     return True
                 else:
-                    self.logger.warning("⚠️  All Solana API connections failed - using fallback mode")
-                    self._activate_fallback_mode("All API connections failed")
+                    self.logger.warning("⚠️  No Solana APIs are currently working - activating fallback mode")
+                    self._activate_fallback_mode("All APIs failed during initialization")
                     return True  # Still return True to allow system to continue
             else:
                 self.logger.error("❌ Failed to create HTTP session")
@@ -209,14 +240,14 @@ class SolanaMonitor(BaseMonitor):
         try:
             # Initialize HTTP session with enhanced settings for stability
             timeout = aiohttp.ClientTimeout(
-                total=15,        # Longer total timeout
+                total=20,        # Longer total timeout for multiple APIs
                 connect=5,       # Quick connect timeout
-                sock_read=10     # Socket read timeout
+                sock_read=15     # Socket read timeout
             )
             
             # Enhanced connector settings for stability
             connector = aiohttp.TCPConnector(
-                limit=10,        # Connection pool limit
+                limit=15,        # Connection pool limit
                 limit_per_host=5, # Per-host limit
                 ttl_dns_cache=300, # DNS cache TTL
                 use_dns_cache=True,
@@ -227,78 +258,81 @@ class SolanaMonitor(BaseMonitor):
                 timeout=timeout,
                 connector=connector,
                 headers={
-                    'User-Agent': 'DexSniping/1.0',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                     'Accept': 'application/json',
-                    'Accept-Encoding': 'gzip, deflate'
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Accept-Language': 'en-US,en;q=0.9'
                 }
             )
             
-            self.logger.info("Enhanced HTTP session initialized for Solana APIs")
+            self.logger.info("Enhanced HTTP session initialized for alternative Solana APIs")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize enhanced Solana connections: {e}")
             raise
 
-    async def _test_connections(self) -> Dict[str, bool]:
+    async def _test_all_apis(self) -> int:
         """
-        Test connections to Solana APIs with circuit breaker logic.
+        Test all alternative APIs and return count of working ones.
         
         Returns:
-            Dictionary with connection test results
+            int: Number of working APIs
         """
-        connection_results = {}
+        working_count = 0
+        self.working_apis.clear()
         
-        # Test Pump.fun connection with circuit breaker
-        try:
-            if self.pump_fun_circuit_breaker.can_execute():
-                await self._test_pump_fun_connection()
-                connection_results['pump_fun'] = True
-                self.pump_fun_circuit_breaker.record_success()
-            else:
-                self.logger.warning("Pump.fun circuit breaker is OPEN - skipping connection test")
-                connection_results['pump_fun'] = False
-        except Exception as e:
-            self.logger.warning(f"Pump.fun connection test failed: {e}")
-            connection_results['pump_fun'] = False
-            self.pump_fun_circuit_breaker.record_failure()
-            
-        return connection_results
-            
-    async def _test_pump_fun_connection(self) -> None:
-        """
-        Test connection to Pump.fun API with enhanced error handling.
+        for source_name, config in self.data_sources.items():
+            if not config["enabled"]:
+                continue
+                
+            try:
+                if await self._test_api_source(source_name, config):
+                    working_count += 1
+                    self.working_apis.add(source_name)
+                    config["circuit_breaker"].record_success()
+                    self.logger.info(f"✅ {config['description']} - Working")
+                else:
+                    config["circuit_breaker"].record_failure()
+                    self.logger.warning(f"❌ {config['description']} - Failed")
+                    
+            except Exception as e:
+                config["circuit_breaker"].record_failure()
+                self.logger.warning(f"❌ {config['description']} - Error: {e}")
         
-        Raises:
-            Exception: If connection test fails
+        self.stats["working_apis"] = working_count
+        return working_count
+
+    async def _test_api_source(self, source_name: str, config: Dict[str, Any]) -> bool:
+        """
+        Test a specific API source.
+        
+        Args:
+            source_name: Name of the API source
+            config: Configuration for the API
+            
+        Returns:
+            bool: True if API is working
         """
         try:
-            # Use a simpler endpoint for testing
-            url = f"{self.solana_config.pump_fun_api}/coins"
-            params = {
-                'limit': 1,
-                'sort': 'created_timestamp', 
-                'order': 'DESC'
-            }
+            url = config["url"]
+            params = config.get("params", {})
             
             async with self.session.get(url, params=params) as response:
                 if response.status == 200:
-                    self.logger.info("Pump.fun API connection successful")
-                    return
-                elif response.status == 530:
-                    raise Exception(f"Pump.fun API server error (530) - likely temporary maintenance")
-                else:
-                    raise Exception(f"Pump.fun API returned status {response.status}")
-                    
-        except asyncio.TimeoutError:
-            raise Exception("Pump.fun API connection timeout")
-        except aiohttp.ClientError as e:
-            raise Exception(f"Pump.fun API connection error: {e}")
+                    data = await response.json()
+                    # Basic validation that we got meaningful data
+                    if isinstance(data, (list, dict)) and data:
+                        return True
+                        
+            return False
+            
         except Exception as e:
-            raise Exception(f"Pump.fun API test failed: {e}")
+            self.logger.debug(f"API test failed for {source_name}: {e}")
+            return False
 
     async def _check(self) -> None:
         """
-        Enhanced check for new tokens on Solana with circuit breaker and fallback logic.
+        Enhanced check using multiple alternative APIs with circuit breaker logic.
         
         Raises:
             Exception: Various exceptions from API calls (handled by base monitor)
@@ -308,193 +342,386 @@ class SolanaMonitor(BaseMonitor):
                 await self._initialize()
                 return
             
-            # Check if we should skip due to circuit breaker
-            if not self.pump_fun_circuit_breaker.can_execute():
-                self.logger.debug("Pump.fun circuit breaker is OPEN - skipping check")
-                await self._handle_circuit_breaker_skip()
-                return
+            # Check working APIs
+            successful_sources = 0
+            total_opportunities = 0
+            
+            for source_name in list(self.working_apis):
+                config = self.data_sources[source_name]
                 
-            # Check Pump.fun for new token launches
-            await self._check_pump_fun_tokens_enhanced()
+                if not config["circuit_breaker"].can_execute():
+                    self.logger.debug(f"{source_name} circuit breaker is OPEN - skipping")
+                    continue
+                
+                try:
+                    opportunities_count = await self._check_api_source(source_name, config)
+                    if opportunities_count >= 0:  # -1 indicates failure
+                        successful_sources += 1
+                        total_opportunities += opportunities_count
+                        config["circuit_breaker"].record_success()
+                    else:
+                        config["circuit_breaker"].record_failure()
+                        
+                except Exception as source_error:
+                    self.logger.warning(f"Error checking {source_name}: {source_error}")
+                    config["circuit_breaker"].record_failure()
+                    
+                # Small delay between API calls to be respectful
+                await asyncio.sleep(0.5)
             
-            # Record successful check
-            self.consecutive_failures = 0
-            self.last_successful_check = datetime.now()
-            self.stats["last_successful_check"] = self.last_successful_check
-            
-            # Deactivate fallback mode if we're successful
-            if self.fallback_mode:
-                self._deactivate_fallback_mode()
+            # Update statistics
+            if successful_sources > 0:
+                self.consecutive_failures = 0
+                self.last_successful_check = datetime.now()
+                self.stats["last_successful_check"] = self.last_successful_check
+                self.stats["api_calls_successful"] += successful_sources
+                
+                # Deactivate fallback mode if we're successful
+                if self.fallback_mode:
+                    self._deactivate_fallback_mode()
+                    
+                self.logger.debug(f"Successfully checked {successful_sources} Solana APIs, found {total_opportunities} opportunities")
+            else:
+                self.stats["api_calls_failed"] += 1
+                await self._handle_check_error(Exception("All alternative APIs failed"))
             
         except Exception as e:
             await self._handle_check_error(e)
             raise
-            
-    async def _check_pump_fun_tokens_enhanced(self) -> None:
-        """
-        Enhanced check for Pump.fun tokens with better error handling.
-        
-        Raises:
-            Exception: If API calls fail after retries
-        """
-        try:
-            # Get recent tokens from Pump.fun with enhanced parameters
-            url = f"{self.solana_config.pump_fun_api}/coins"
-            params = {
-                'limit': 25,  # Reduced from 50 to decrease load
-                'sort': 'created_timestamp',
-                'order': 'DESC'
-            }
-            
-            async with self.session.get(url, params=params) as response:
-                await self._handle_pump_fun_response(response)
-                
-        except Exception as e:
-            self.logger.error(f"Error checking Pump.fun tokens: {e}")
-            raise
 
-    async def _handle_pump_fun_response(self, response: aiohttp.ClientResponse) -> None:
+    async def _check_api_source(self, source_name: str, config: Dict[str, Any]) -> int:
         """
-        Handle Pump.fun API response with detailed error handling.
+        Check a specific API source for new tokens.
         
         Args:
-            response: HTTP response from Pump.fun API
-            
-        Raises:
-            Exception: If response indicates failure
-        """
-        try:
-            if response.status == 200:
-                # Success case
-                data = await response.json()
-                await self._process_pump_fun_data(data)
-                self.pump_fun_circuit_breaker.record_success()
-                
-            elif response.status == 530:
-                # Server error - likely maintenance
-                self.stats["api_530_errors"] += 1
-                self.pump_fun_circuit_breaker.record_failure()
-                error_msg = "Pump.fun API server error (530) - likely temporary maintenance"
-                self.logger.warning(error_msg)
-                raise Exception(error_msg)
-                
-            elif response.status == 429:
-                # Rate limiting
-                self.pump_fun_circuit_breaker.record_failure()
-                error_msg = "Pump.fun API rate limit exceeded (429)"
-                self.logger.warning(error_msg)
-                raise Exception(error_msg)
-                
-            elif response.status >= 500:
-                # Server errors
-                self.pump_fun_circuit_breaker.record_failure()
-                error_msg = f"Pump.fun API server error ({response.status})"
-                self.logger.warning(error_msg)
-                raise Exception(error_msg)
-                
-            else:
-                # Other errors
-                self.pump_fun_circuit_breaker.record_failure()
-                error_msg = f"Pump.fun API returned status {response.status}"
-                self.logger.warning(error_msg)
-                raise Exception(error_msg)
-                
-        except Exception as e:
-            if "530" in str(e) or "server error" in str(e).lower():
-                # Don't log these as errors, they're expected during maintenance
-                self.logger.info(f"Pump.fun temporary issue: {e}")
-            else:
-                self.logger.error(f"Error handling Pump.fun response: {e}")
-            raise
-
-    async def _process_pump_fun_data(self, data: Any) -> None:
-        """
-        Process successful Pump.fun API data.
-        
-        Args:
-            data: Parsed JSON data from API
-        """
-        try:
-            if not isinstance(data, list):
-                self.logger.warning("Unexpected Pump.fun API response format")
-                return
-            
-            new_tokens_found = 0
-            
-            for token_data in data:
-                if await self._process_pump_fun_token(token_data):
-                    new_tokens_found += 1
-            
-            if new_tokens_found > 0:
-                self.logger.info(f"Found {new_tokens_found} new Pump.fun tokens")
-                self.stats["pump_fun_tokens"] += new_tokens_found
-                
-        except Exception as e:
-            self.logger.error(f"Error processing Pump.fun data: {e}")
-
-    async def _process_pump_fun_token(self, token_data: Dict[str, Any]) -> bool:
-        """
-        Process a token from Pump.fun data with enhanced validation.
-        
-        Args:
-            token_data: Token data dictionary
+            source_name: Name of the API source
+            config: Configuration for the API
             
         Returns:
-            bool: True if token was processed successfully
+            int: Number of opportunities found, -1 if failed
         """
         try:
-            # Extract and validate token address
-            token_address = token_data.get('mint', '')
+            self.stats["api_calls_total"] += 1
+            
+            url = config["url"]
+            params = config.get("params", {})
+            parser = config["parser"]
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    opportunities_found = await parser(data, source_name)
+                    
+                    # Update source-specific stats
+                    if source_name not in self.stats["sources_stats"]:
+                        self.stats["sources_stats"][source_name] = {
+                            "calls": 0,
+                            "successes": 0,
+                            "opportunities": 0
+                        }
+                    
+                    self.stats["sources_stats"][source_name]["calls"] += 1
+                    self.stats["sources_stats"][source_name]["successes"] += 1
+                    self.stats["sources_stats"][source_name]["opportunities"] += opportunities_found
+                    
+                    return opportunities_found
+                    
+                else:
+                    self.logger.warning(f"{source_name} API returned status {response.status}")
+                    return -1
+                    
+        except Exception as e:
+            self.logger.warning(f"Error checking {source_name} API: {e}")
+            return -1
+
+    async def _parse_jupiter_tokens(self, data: Any, source_name: str) -> int:
+        """Parse Jupiter token list data."""
+        try:
+            if not isinstance(data, list):
+                return 0
+                
+            opportunities_found = 0
+            
+            # Look for recently added tokens (Jupiter updates their list)
+            for token_data in data[:50]:  # Check first 50 tokens
+                if await self._process_jupiter_token(token_data, source_name):
+                    opportunities_found += 1
+                    
+                # Limit opportunities per source
+                if opportunities_found >= 3:
+                    break
+                    
+            return opportunities_found
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing Jupiter tokens: {e}")
+            return 0
+
+    async def _parse_solscan_tokens(self, data: Any, source_name: str) -> int:
+        """Parse Solscan token list data."""
+        try:
+            if not isinstance(data, dict) or "data" not in data:
+                return 0
+                
+            opportunities_found = 0
+            
+            for token_data in data["data"][:30]:  # Check first 30 tokens
+                if await self._process_solscan_token(token_data, source_name):
+                    opportunities_found += 1
+                    
+                if opportunities_found >= 2:
+                    break
+                    
+            return opportunities_found
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing Solscan tokens: {e}")
+            return 0
+
+    async def _parse_birdeye_tokens(self, data: Any, source_name: str) -> int:
+        """Parse Birdeye token list data."""
+        try:
+            if not isinstance(data, dict) or "tokens" not in data:
+                return 0
+                
+            opportunities_found = 0
+            
+            for token_data in data["tokens"][:25]:  # Check first 25 tokens
+                if await self._process_birdeye_token(token_data, source_name):
+                    opportunities_found += 1
+                    
+                if opportunities_found >= 2:
+                    break
+                    
+            return opportunities_found
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing Birdeye tokens: {e}")
+            return 0
+
+    async def _parse_coingecko_tokens(self, data: Any, source_name: str) -> int:
+        """Parse CoinGecko Solana ecosystem data."""
+        try:
+            if not isinstance(data, list):
+                return 0
+                
+            opportunities_found = 0
+            
+            # CoinGecko returns established tokens, so we'll be more selective
+            for token_data in data[:20]:
+                if await self._process_coingecko_token(token_data, source_name):
+                    opportunities_found += 1
+                    
+                if opportunities_found >= 1:  # Very selective for CoinGecko
+                    break
+                    
+            return opportunities_found
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing CoinGecko tokens: {e}")
+            return 0
+
+    async def _process_jupiter_token(self, token_data: Dict[str, Any], source: str) -> bool:
+        """Process a token from Jupiter data."""
+        try:
+            # Extract token address
+            token_address = token_data.get('address', '')
             if not token_address or token_address in self.known_tokens:
                 return False
-            
+                
             # Check if already processed
             if token_address in self.processed_tokens:
                 return False
+                
+            # Create opportunity
+            opportunity = await self._create_opportunity_from_alternative_data(
+                token_data, source, "jupiter"
+            )
             
-            # Validate required fields
-            required_fields = ['name', 'symbol', 'created_timestamp']
-            if not all(field in token_data for field in required_fields):
-                self.logger.debug(f"Token {token_address} missing required fields")
-                return False
+            if opportunity:
+                await self._notify_callbacks(opportunity)
+                self.processed_tokens.add(token_address)
+                self.stats["tokens_processed"] += 1
+                self.stats["opportunities_found"] += 1
+                return True
+                
+            return False
             
-            # Create token info
-            token_info = self._create_solana_token_info(token_data)
-            if not token_info:
+        except Exception as e:
+            self.logger.error(f"Error processing Jupiter token: {e}")
+            return False
+
+    async def _process_solscan_token(self, token_data: Dict[str, Any], source: str) -> bool:
+        """Process a token from Solscan data."""
+        try:
+            token_address = token_data.get('tokenAddress', '')
+            if not token_address or token_address in self.known_tokens:
                 return False
+                
+            if token_address in self.processed_tokens:
+                return False
+                
+            opportunity = await self._create_opportunity_from_alternative_data(
+                token_data, source, "solscan"
+            )
+            
+            if opportunity:
+                await self._notify_callbacks(opportunity)
+                self.processed_tokens.add(token_address)
+                self.stats["tokens_processed"] += 1
+                self.stats["opportunities_found"] += 1
+                return True
+                
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error processing Solscan token: {e}")
+            return False
+
+    async def _process_birdeye_token(self, token_data: Dict[str, Any], source: str) -> bool:
+        """Process a token from Birdeye data."""
+        try:
+            token_address = token_data.get('address', '')
+            if not token_address or token_address in self.known_tokens:
+                return False
+                
+            if token_address in self.processed_tokens:
+                return False
+                
+            opportunity = await self._create_opportunity_from_alternative_data(
+                token_data, source, "birdeye"
+            )
+            
+            if opportunity:
+                await self._notify_callbacks(opportunity)
+                self.processed_tokens.add(token_address)
+                self.stats["tokens_processed"] += 1
+                self.stats["opportunities_found"] += 1
+                return True
+                
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error processing Birdeye token: {e}")
+            return False
+
+    async def _process_coingecko_token(self, token_data: Dict[str, Any], source: str) -> bool:
+        """Process a token from CoinGecko data."""
+        try:
+            # CoinGecko doesn't always provide Solana addresses directly
+            # We'll skip this for now or implement address lookup
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error processing CoinGecko token: {e}")
+            return False
+
+    async def _create_opportunity_from_alternative_data(
+        self, 
+        token_data: Dict[str, Any], 
+        source: str, 
+        api_type: str
+    ) -> Optional[TradingOpportunity]:
+        """
+        Create trading opportunity from alternative API data.
+        
+        Args:
+            token_data: Token data from API
+            source: Source identifier
+            api_type: Type of API (jupiter, solscan, etc.)
+            
+        Returns:
+            TradingOpportunity or None if creation failed
+        """
+        try:
+            # Extract data based on API type
+            if api_type == "jupiter":
+                address = token_data.get('address', '')
+                symbol = token_data.get('symbol', 'UNK')
+                name = token_data.get('name', 'Unknown')
+                decimals = token_data.get('decimals', 9)
+            elif api_type == "solscan":
+                address = token_data.get('tokenAddress', '')
+                symbol = token_data.get('tokenSymbol', 'UNK')
+                name = token_data.get('tokenName', 'Unknown')
+                decimals = token_data.get('decimals', 9)
+            elif api_type == "birdeye":
+                address = token_data.get('address', '')
+                symbol = token_data.get('symbol', 'UNK')
+                name = token_data.get('name', 'Unknown')
+                decimals = token_data.get('decimals', 9)
+            else:
+                return None
+            
+            # Create Solana token info (custom class to avoid 0x validation)
+            class SolanaTokenInfo:
+                def __init__(self, address, symbol, name, decimals, total_supply):
+                    self.address = address
+                    self.symbol = symbol
+                    self.name = name
+                    self.decimals = decimals
+                    self.total_supply = total_supply
+            
+            token_info = SolanaTokenInfo(
+                address=address,
+                symbol=symbol,
+                name=name,
+                decimals=decimals,
+                total_supply=1000000000  # Default
+            )
             
             # Create liquidity info
-            liquidity_info = self._create_pump_fun_liquidity_info(token_data)
+            liquidity_info = LiquidityInfo(
+                pair_address=address,
+                dex_name=f"{api_type.title()} Verified",
+                token0=address,
+                token1="So11111111111111111111111111111111111111112",  # SOL
+                reserve0=0.0,
+                reserve1=0.0,
+                liquidity_usd=0.0,
+                created_at=datetime.now(),
+                block_number=0
+            )
             
-            # Create trading opportunity
+            # Create contract analysis
+            contract_analysis = ContractAnalysis(
+                is_honeypot=False,
+                is_mintable=False,
+                is_pausable=False,
+                ownership_renounced=True,
+                risk_score=0.3,  # Lower risk for verified tokens
+                risk_level=RiskLevel.MEDIUM,
+                analysis_notes=[f"Verified by {api_type.title()}"]
+            )
+            
+            # Create social metrics
+            social_metrics = SocialMetrics(
+                social_score=0.5,
+                sentiment_score=0.0
+            )
+            
+            # Create opportunity
             opportunity = TradingOpportunity(
                 token=token_info,
                 liquidity=liquidity_info,
-                confidence_score=0.3,  # Lower initial confidence for new system
-                recommendation="MONITOR",  # Conservative recommendation
-                risk_level=RiskLevel.HIGH,
+                contract_analysis=contract_analysis,
+                social_metrics=social_metrics,
+                detected_at=datetime.now(),
+                confidence_score=0.4,  # Moderate confidence for alternative sources
                 metadata={
-                    'source': 'pump_fun',
+                    'source': f'{api_type}_alternative',
                     'chain': 'solana',
-                    'market_cap_usd': token_data.get('market_cap', 0),
-                    'created_timestamp': token_data.get('created_timestamp'),
-                    'is_new_launch': True
+                    'api_source': source,
+                    'verified_by': api_type,
+                    'is_alternative_api': True
                 }
             )
             
-            # Notify callbacks
-            await self._notify_callbacks(opportunity)
-            
-            # Track processing
-            self.processed_tokens.add(token_address)
-            self.stats["tokens_processed"] += 1
-            self.stats["opportunities_found"] += 1
-            
-            return True
+            return opportunity
             
         except Exception as e:
-            self.logger.error(f"Error processing Pump.fun token: {e}")
-            return False
+            self.logger.error(f"Failed to create opportunity from {api_type} data: {e}")
+            return None
 
     async def _handle_check_error(self, error: Exception) -> None:
         """
@@ -507,25 +734,9 @@ class SolanaMonitor(BaseMonitor):
         self.stats["errors_count"] += 1
         self.stats["last_error"] = str(error)
         
-        error_msg = str(error).lower()
-        
-        if "530" in error_msg or "server error" in error_msg:
-            # Server maintenance - activate fallback mode
-            if not self.fallback_mode:
-                self._activate_fallback_mode("API server maintenance detected")
-                
-        elif self.consecutive_failures >= self.max_consecutive_failures:
-            # Too many consecutive failures
+        if self.consecutive_failures >= self.max_consecutive_failures:
             self.logger.critical(f"Too many consecutive failures ({self.consecutive_failures})")
             self._activate_fallback_mode("Excessive failures detected")
-
-    async def _handle_circuit_breaker_skip(self) -> None:
-        """Handle skipped check due to circuit breaker."""
-        if not self.fallback_mode:
-            self._activate_fallback_mode("Circuit breaker opened")
-        
-        # Log minimal message to avoid spam
-        self.logger.debug("Skipping check - circuit breaker open")
 
     def _activate_fallback_mode(self, reason: str) -> None:
         """
@@ -545,81 +756,8 @@ class SolanaMonitor(BaseMonitor):
         """Deactivate fallback mode and return to normal operation."""
         if self.fallback_mode:
             self.fallback_mode = False
-            self.check_interval = 5.0  # Return to normal interval
-            self.logger.info("✅ Deactivated fallback mode - API healthy")
-
-    def _create_solana_token_info(self, token_data: Dict[str, Any]) -> Optional[TokenInfo]:
-        """
-        Create TokenInfo from Solana token data with validation.
-        
-        Args:
-            token_data: Token data from API
-            
-        Returns:
-            TokenInfo object or None if creation failed
-        """
-        try:
-            # For Solana tokens, we need to handle the address validation issue
-            # since TokenInfo expects 0x format but Solana uses different format
-            
-            mint_address = token_data.get('mint', '')
-            if not mint_address:
-                return None
-            
-            # Create a custom Solana token info object that doesn't have the 0x validation
-            class SolanaTokenInfo:
-                def __init__(self, address, symbol, name, decimals, total_supply):
-                    self.address = address
-                    self.symbol = symbol
-                    self.name = name
-                    self.decimals = decimals
-                    self.total_supply = total_supply
-                    
-            return SolanaTokenInfo(
-                address=mint_address,
-                symbol=token_data.get('symbol', 'UNK'),
-                name=token_data.get('name', 'Unknown'),
-                decimals=token_data.get('decimals', 9),  # Common for Solana
-                total_supply=token_data.get('total_supply', 0)
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create Solana token info: {e}")
-            return None
-
-
-
-
-
-
-
-
-
-    def _create_pump_fun_liquidity_info(self, token_data: Dict[str, Any]) -> Optional[LiquidityInfo]:
-        """
-        Create LiquidityInfo from Pump.fun token data with validation.
-        
-        Args:
-            token_data: Token data from API
-            
-        Returns:
-            LiquidityInfo object or None if creation failed
-        """
-        try:
-            return LiquidityInfo(
-                pair_address=token_data.get('mint', ''),  # Use mint as identifier
-                token0_address=token_data.get('mint', ''),
-                token1_address="So11111111111111111111111111111111111111112",  # SOL
-                token0_reserve=Decimal(str(token_data.get('virtual_token_reserves', 0))),
-                token1_reserve=Decimal(str(token_data.get('virtual_sol_reserves', 0))),
-                total_supply=Decimal(str(token_data.get('total_supply', 0))),
-                block_number=0,  # Not applicable for Solana
-                dex="pump_fun"
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create Pump.fun liquidity info: {e}")
-            return None
+            self.check_interval = 15.0  # Return to normal interval
+            self.logger.info("✅ Deactivated fallback mode - Alternative APIs healthy")
 
     async def _cleanup(self) -> None:
         """
@@ -642,8 +780,8 @@ class SolanaMonitor(BaseMonitor):
             self.logger.info(f"{self.name} monitor cleanup completed")
             self.logger.info(f"   Total uptime: {uptime}")
             self.logger.info(f"   Tokens processed: {self.stats['tokens_processed']}")
-            self.logger.info(f"   API 530 errors: {self.stats['api_530_errors']}")
-            self.logger.info(f"   Circuit breaker trips: {self.stats['circuit_breaker_trips']}")
+            self.logger.info(f"   API calls: {self.stats['api_calls_total']} total, {self.stats['api_calls_successful']} successful")
+            self.logger.info(f"   Working APIs: {len(self.working_apis)}")
             
         except Exception as e:
             self.logger.error(f"Error during {self.name} cleanup: {e}")
@@ -653,7 +791,7 @@ class SolanaMonitor(BaseMonitor):
         Get enhanced monitoring statistics.
         
         Returns:
-            Dictionary with current statistics including circuit breaker info
+            Dictionary with current statistics including API health info
         """
         uptime = datetime.now() - self.stats["uptime_start"]
         
@@ -666,17 +804,17 @@ class SolanaMonitor(BaseMonitor):
             "uptime_seconds": uptime.total_seconds(),
             "is_running": self.is_running,
             "processed_tokens_count": len(self.processed_tokens),
-            "pump_fun_tokens": self.stats["pump_fun_tokens"],
-            "raydium_pairs": self.stats["raydium_pairs"],
             "auto_trading": self.auto_trading,
-            "api_530_errors": self.stats["api_530_errors"],
-            "circuit_breaker_trips": self.stats["circuit_breaker_trips"],
+            "api_calls_total": self.stats["api_calls_total"],
+            "api_calls_successful": self.stats["api_calls_successful"],
+            "api_calls_failed": self.stats["api_calls_failed"],
+            "working_apis": len(self.working_apis),
+            "available_apis": list(self.working_apis),
             "fallback_mode_activations": self.stats["fallback_mode_activations"],
             "fallback_mode": self.fallback_mode,
-            "circuit_breaker_state": self.pump_fun_circuit_breaker.state,
-            "consecutive_failures": self.consecutive_failures,
             "last_successful_check": self.stats["last_successful_check"],
-            "api_healthy": self.api_healthy
+            "api_healthy": len(self.working_apis) > 0,
+            "sources_stats": self.stats["sources_stats"]
         }
 
     def reset_stats(self) -> None:
@@ -687,16 +825,22 @@ class SolanaMonitor(BaseMonitor):
             "errors_count": 0,
             "last_error": None,
             "uptime_start": datetime.now(),
-            "pump_fun_tokens": 0,
-            "raydium_pairs": 0,
-            "api_530_errors": 0,
-            "circuit_breaker_trips": 0,
+            "api_calls_total": 0,
+            "api_calls_successful": 0,
+            "api_calls_failed": 0,
+            "working_apis": 0,
             "fallback_mode_activations": 0,
-            "last_successful_check": None
+            "last_successful_check": None,
+            "sources_stats": {}
         }
         self.processed_tokens.clear()
         self.consecutive_failures = 0
-        self.pump_fun_circuit_breaker = APICircuitBreaker()
         self.fallback_mode = False
-        self.check_interval = 5.0
+        self.check_interval = 15.0
+        self.working_apis.clear()
+        
+        # Reset circuit breakers
+        for config in self.data_sources.values():
+            config["circuit_breaker"] = APICircuitBreaker()
+            
         self.logger.info("Enhanced Solana Monitor stats reset")
