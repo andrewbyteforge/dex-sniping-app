@@ -471,7 +471,7 @@ class EnhancedTradingSystem:
 
     async def _initialize_dashboard(self) -> None:
         """
-        Initialize the web dashboard with port conflict handling.
+        Initialize the web dashboard with robust port conflict handling.
         
         Sets up the web server and dashboard components for real-time monitoring.
         """
@@ -481,67 +481,82 @@ class EnhancedTradingSystem:
             # Initialize dashboard server with trading system reference
             await dashboard_server.initialize(self)
             
-            # Start the FastAPI server in background with port fallback
+            # Start the FastAPI server in background with robust port fallback
             import uvicorn
+            import socket
             
             # Import the FastAPI app
             from api.dashboard_server import app
             
-            # Try multiple ports if 8000 is in use
-            ports_to_try = [8000, 8001, 8002, 8003, 8004]
-            server_started = False
-            
-            for port in ports_to_try:
+            # Function to check if port is available
+            def is_port_available(port: int) -> bool:
                 try:
-                    self.logger.info(f"🌐 Attempting to start dashboard on port {port}...")
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.bind(('0.0.0.0', port))
+                        return True
+                except socket.error:
+                    return False
+            
+            # Try multiple ports if 8000 is in use
+            ports_to_try = [8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009]
+            server_started = False
+            selected_port = None
+            
+            # First, find an available port
+            for port in ports_to_try:
+                if is_port_available(port):
+                    selected_port = port
+                    self.logger.info(f"🌐 Found available port: {port}")
+                    break
+            
+            if not selected_port:
+                self.logger.warning("⚠️ No available ports found - continuing without dashboard")
+                self.dashboard_uvicorn_server = None
+                self.dashboard_task = None
+                return
+            
+            # Now try to start the server on the selected port
+            try:
+                self.logger.info(f"🚀 Starting dashboard server on port {selected_port}...")
+                
+                # Create server config with selected port
+                config = uvicorn.Config(
+                    app=app,
+                    host="0.0.0.0",
+                    port=selected_port,
+                    log_level="error",  # Minimize uvicorn log noise
+                    access_log=False,
+                    use_colors=False
+                )
+                
+                # Create server instance
+                self.dashboard_uvicorn_server = uvicorn.Server(config)
+                
+                # Start server in background task
+                self.dashboard_task = asyncio.create_task(
+                    self.dashboard_uvicorn_server.serve()
+                )
+                
+                # Give it time to start
+                await asyncio.sleep(3)
+                
+                # Check if server started successfully
+                if not self.dashboard_task.done():
+                    server_started = True
+                    self.dashboard_port = selected_port
+                    self.logger.info(f"✅ Dashboard started successfully on port {selected_port}")
+                    self.logger.info(f"   🌐 Access at: http://localhost:{selected_port}")
+                else:
+                    # Check for exceptions
+                    exception = self.dashboard_task.exception()
+                    if exception:
+                        self.logger.error(f"Dashboard server failed: {exception}")
                     
-                    # Create server config
-                    config = uvicorn.Config(
-                        app=app,
-                        host="0.0.0.0",
-                        port=port,
-                        log_level="warning",  # Reduce uvicorn log noise
-                        access_log=False
-                    )
-                    
-                    # Create and store server instance
-                    self.dashboard_uvicorn_server = uvicorn.Server(config)
-                    
-                    # Start server in background task
-                    self.dashboard_task = asyncio.create_task(
-                        self.dashboard_uvicorn_server.serve()
-                    )
-                    
-                    # Give it a moment to start and check if it's successful
-                    await asyncio.sleep(2)
-                    
-                    # Check if the task failed immediately (port conflict)
-                    if self.dashboard_task.done():
-                        exception = self.dashboard_task.exception()
-                        if exception and "10048" in str(exception):  # Port in use error
-                            self.logger.warning(f"❌ Port {port} is in use, trying next port...")
-                            continue
-                        else:
-                            # Some other error
-                            raise exception
-                    else:
-                        # Server started successfully
-                        server_started = True
-                        self.dashboard_port = port
-                        self.logger.info(f"✅ Dashboard initialized on port {port}")
-                        self.logger.info(f"   🌐 Access at: http://localhost:{port}")
-                        break
-                        
-                except Exception as e:
-                    self.logger.warning(f"Failed to start on port {port}: {e}")
-                    if "10048" in str(e):  # Port in use
-                        continue
-                    else:
-                        # Some other error, don't try more ports
-                        break
+            except Exception as e:
+                self.logger.error(f"Failed to start dashboard on port {selected_port}: {e}")
             
             if not server_started:
-                self.logger.warning("⚠️ Could not start dashboard on any port - continuing without dashboard")
+                self.logger.warning("⚠️ Could not start dashboard - continuing without web interface")
                 self.dashboard_uvicorn_server = None
                 self.dashboard_task = None
                 
@@ -550,6 +565,13 @@ class EnhancedTradingSystem:
             # Don't raise - continue without dashboard
             self.dashboard_uvicorn_server = None
             self.dashboard_task = None
+
+
+
+
+
+
+
 
     async def start(self) -> None:
         """

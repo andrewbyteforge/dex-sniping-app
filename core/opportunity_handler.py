@@ -671,7 +671,7 @@ class OpportunityHandler:
 
     async def _create_realistic_test_opportunity(self) -> Optional[TradingOpportunity]:
         """
-        Create a realistic test opportunity with varied data.
+        Create a realistic test opportunity with proper address validation.
         
         Returns:
             Optional[TradingOpportunity]: Test opportunity or None if creation failed
@@ -699,22 +699,27 @@ class OpportunityHandler:
             # Select random token
             symbol, name, chain = random.choice(test_tokens)
             
-            # Generate realistic addresses based on chain
-            if chain == "solana":
-                # Solana addresses are base58 encoded, ~44 characters
-                test_address = f"{random.randint(100000, 999999)}{''.join(random.choices('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz', k=37))}"
-            else:
-                # Ethereum/Base addresses
-                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+            # Generate ONLY Ethereum-style addresses for ALL chains (including Solana)
+            # This is because our TokenInfo validation expects Ethereum format
+            test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
             
-            # Create token info
-            token_info = TokenInfo(
-                address=test_address,
-                symbol=symbol,
-                name=name,
-                decimals=18,
-                total_supply=random.randint(100_000_000, 10_000_000_000)
-            )
+            # Validate the address format (should always pass now)
+            if not test_address or len(test_address) != 42 or not test_address.startswith('0x'):
+                self.logger.error(f"Generated invalid address format: {test_address}")
+                return None
+            
+            # Create token info with guaranteed valid address
+            try:
+                token_info = TokenInfo(
+                    address=test_address,
+                    symbol=symbol,
+                    name=name,
+                    decimals=18,
+                    total_supply=random.randint(100_000_000, 10_000_000_000)
+                )
+            except ValueError as e:
+                self.logger.error(f"TokenInfo validation failed for {test_address}: {e}")
+                return None
             
             # Generate realistic liquidity
             liquidity_usd = random.uniform(1000, 500000)
@@ -726,11 +731,16 @@ class OpportunityHandler:
                 "solana": ["Raydium", "Orca", "Jupiter"]
             }
             
+            # Use Ethereum-style addresses for all token references
+            quote_token = "0x0000000000000000000000000000000000000000"  # ETH
+            if chain == "solana":
+                quote_token = "0x" + "1" * 40  # Mock SOL address in Ethereum format
+            
             liquidity_info = LiquidityInfo(
                 pair_address=test_address,
                 dex_name=random.choice(dex_names[chain]),
                 token0=test_address,
-                token1="0x0000000000000000000000000000000000000000" if chain != "solana" else "So11111111111111111111111111111111111111112",
+                token1=quote_token,
                 reserve0=float(liquidity_usd / 2),
                 reserve1=float(liquidity_usd / 2),
                 liquidity_usd=liquidity_usd,
@@ -776,6 +786,8 @@ class OpportunityHandler:
             actions = ['BUY', 'MONITOR', 'HOLD', 'AVOID']
             risk_levels = ['low', 'medium', 'high', 'critical']
             
+            overall_score = random.uniform(0.2, 0.95)
+            
             metadata = {
                 'chain': chain,
                 'source': 'test_generator',
@@ -793,7 +805,7 @@ class OpportunityHandler:
                     ])
                 },
                 'trading_score': {
-                    'overall_score': random.uniform(0.2, 0.95),
+                    'overall_score': overall_score,
                     'risk_score': random.uniform(0.1, 0.8),
                     'liquidity_score': random.uniform(0.3, 1.0),
                     'volatility_score': random.uniform(0.1, 0.9),
@@ -821,13 +833,31 @@ class OpportunityHandler:
             
             # Set additional attributes
             opportunity.chain = chain
-            opportunity.confidence_score = metadata['trading_score']['overall_score']
+            opportunity.confidence_score = overall_score
+            
+            self.logger.debug(f"✅ Created test opportunity: {symbol} on {chain} with address {test_address}")
             
             return opportunity
             
         except Exception as e:
             self.logger.error(f"Failed to create test opportunity: {e}")
+            import traceback
+            self.logger.debug(f"Full error: {traceback.format_exc()}")
             return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     async def start_continuous_test_generation(self, opportunities_per_minute: int = 5) -> None:
         """
