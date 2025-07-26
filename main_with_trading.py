@@ -274,8 +274,13 @@ class EnhancedTradingSystem:
             # Don't raise - continue without analyzers
             self.analyzers = {'contract': None, 'social': None, 'trading_scorer': None}
 
+    # Add this import to the top of main_with_trading.py
+    from monitors.raydium_monitor import RaydiumMonitor
+
+    # Update the _initialize_monitors method in main_with_trading.py:
+
     async def _initialize_monitors(self) -> None:
-        """Initialize blockchain monitors with proper Solana setup."""
+        """Initialize all blockchain monitors with enhanced Raydium integration."""
         try:
             self.logger.info("Initializing blockchain monitors...")
             
@@ -312,6 +317,22 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Solana monitor failed: {e}")
             
+            # NEW: Raydium DEX monitor
+            try:
+                raydium_monitor = RaydiumMonitor(check_interval=10.0)
+                raydium_monitor.add_callback(self._handle_opportunity)
+                
+                if await raydium_monitor.initialize():
+                    self.monitors.append(raydium_monitor)
+                    self.logger.info("✅ Raydium DEX monitor initialized")
+                    self.logger.info(f"   🔗 Monitoring whale threshold: ${raydium_monitor.whale_threshold_usd:,.0f}")
+                    self.logger.info(f"   📊 Known pools baseline: {len(raydium_monitor.known_pools)}")
+                else:
+                    self.logger.warning("❌ Raydium monitor initialization failed")
+                    
+            except Exception as e:
+                self.logger.warning(f"Raydium monitor failed: {e}")
+            
             # Jupiter monitor
             try:
                 jupiter_monitor = JupiterSolanaMonitor()
@@ -322,23 +343,33 @@ class EnhancedTradingSystem:
                 self.logger.warning(f"Jupiter monitor failed: {e}")
             
             active_monitors = len(self.monitors)
-            self.logger.info(f"✅ {active_monitors}/4 monitors initialized successfully")
+            self.logger.info(f"✅ {active_monitors}/5 monitors initialized successfully")
             
             if active_monitors == 0:
                 self.logger.error("No monitors initialized successfully")
                 raise Exception("Failed to initialize any monitors")
             
-            # OPTION 1: Remove test opportunities (for real monitoring only)
-            # Comment out these lines to disable test mode:
+            # Enhanced monitoring summary
+            self.logger.info("📊 Monitor Summary:")
+            for monitor in self.monitors:
+                monitor_type = type(monitor).__name__
+                if hasattr(monitor, 'get_stats'):
+                    stats = monitor.get_stats()
+                    if 'dex_name' in stats:
+                        self.logger.info(f"   🔗 {stats['dex_name']}: {monitor_type}")
+                    elif 'chain' in stats:
+                        self.logger.info(f"   ⛓️  {stats['chain']}: {monitor_type}")
+                    else:
+                        self.logger.info(f"   📡 {monitor_type}")
+            
             self.logger.info("🧪 Starting test opportunity generation...")
             asyncio.create_task(self._generate_test_opportunities())
-            
-            # OPTION 2: Keep test opportunities but reduce them
-            # self.logger.info("🔍 Real monitoring active - waiting for genuine opportunities...")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize monitors: {e}")
             raise
+
+
 
 
 
