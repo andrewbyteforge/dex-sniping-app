@@ -468,9 +468,12 @@ class EnhancedTradingSystem:
                 self.opportunity_handler.handle_opportunity
             )
 
+    # Fix 1: Update the dashboard server to handle port conflicts
+    # Add this to core/enhanced_trading_system.py in the _initialize_dashboard method
+
     async def _initialize_dashboard(self) -> None:
         """
-        Initialize the web dashboard.
+        Initialize the web dashboard with port conflict handling.
         
         Sets up the web server and dashboard components for real-time monitoring.
         
@@ -483,40 +486,259 @@ class EnhancedTradingSystem:
             # Initialize dashboard server with trading system reference
             await dashboard_server.initialize(self)
             
-            # Start the FastAPI server in background
+            # Start the FastAPI server in background with port fallback
             import uvicorn
             
             # Import the FastAPI app
             from api.dashboard_server import app
             
-            # Create server config
-            config = uvicorn.Config(
-                app=app,
-                host="0.0.0.0",
-                port=8000,
-                log_level="warning",  # Reduce uvicorn log noise
-                access_log=False
-            )
+            # Try multiple ports if 8000 is in use
+            ports_to_try = [8000, 8001, 8002, 8003, 8004]
+            server_started = False
             
-            # Create and store server instance
-            self.dashboard_uvicorn_server = uvicorn.Server(config)
+            for port in ports_to_try:
+                try:
+                    self.logger.info(f"🌐 Attempting to start dashboard on port {port}...")
+                    
+                    # Create server config
+                    config = uvicorn.Config(
+                        app=app,
+                        host="0.0.0.0",
+                        port=port,
+                        log_level="warning",  # Reduce uvicorn log noise
+                        access_log=False
+                    )
+                    
+                    # Create and store server instance
+                    self.dashboard_uvicorn_server = uvicorn.Server(config)
+                    
+                    # Start server in background task
+                    self.dashboard_task = asyncio.create_task(
+                        self.dashboard_uvicorn_server.serve()
+                    )
+                    
+                    # Give it a moment to start and check if it's successful
+                    await asyncio.sleep(2)
+                    
+                    # Check if the task failed immediately (port conflict)
+                    if self.dashboard_task.done():
+                        exception = self.dashboard_task.exception()
+                        if exception and "10048" in str(exception):  # Port in use error
+                            self.logger.warning(f"❌ Port {port} is in use, trying next port...")
+                            continue
+                        else:
+                            # Some other error
+                            raise exception
+                    else:
+                        # Server started successfully
+                        server_started = True
+                        self.dashboard_port = port
+                        self.logger.info(f"✅ Dashboard initialized on port {port}")
+                        self.logger.info(f"   🌐 Access at: http://localhost:{port}")
+                        break
+                        
+                except Exception as e:
+                    self.logger.warning(f"Failed to start on port {port}: {e}")
+                    if "10048" in str(e):  # Port in use
+                        continue
+                    else:
+                        # Some other error, don't try more ports
+                        break
             
-            # Start server in background task
-            self.dashboard_task = asyncio.create_task(
-                self.dashboard_uvicorn_server.serve()
-            )
-            
-            # Give it a moment to start
-            await asyncio.sleep(1)
-            
-            self.logger.info("✅ Dashboard initialized")
-            self.logger.info("   🌐 Access at: http://localhost:8000")
-            
+            if not server_started:
+                self.logger.warning("⚠️ Could not start dashboard on any port - continuing without dashboard")
+                self.dashboard_uvicorn_server = None
+                self.dashboard_task = None
+                
         except Exception as e:
             self.logger.error(f"Failed to initialize dashboard: {e}")
             # Don't raise - continue without dashboard
             self.dashboard_uvicorn_server = None
             self.dashboard_task = None
+
+
+    async def _create_realistic_test_opportunity(self) -> Optional[TradingOpportunity]:
+        """
+        Create a realistic test opportunity with varied data and proper address validation.
+        
+        Returns:
+            Optional[TradingOpportunity]: Test opportunity or None if creation failed
+        """
+        try:
+            # Define realistic test tokens
+            test_tokens = [
+                ("DOGE2", "DogeClassic", "ethereum"),
+                ("PEPE", "PepeCoin", "ethereum"), 
+                ("FLOKI", "Floki", "base"),
+                ("SHIB2", "ShibaInu2", "base"),
+                ("WIF", "dogwifhat", "solana"),
+                ("BONK2", "Bonk2", "solana"),
+                ("MEME", "MemeCoin", "ethereum"),
+                ("CHAD", "ChadCoin", "base"),
+                ("MOON", "MoonToken", "solana"),
+                ("ROCKET", "RocketCoin", "ethereum"),
+                ("DIAMOND", "DiamondHands", "base"),
+                ("HODL", "HodlToken", "solana"),
+                ("LAMBO", "LamboCoin", "ethereum"),
+                ("APE2", "ApeToken2", "base"),
+                ("CATS", "CatsCoin", "solana")
+            ]
+            
+            # Select random token
+            symbol, name, chain = random.choice(test_tokens)
+            
+            # Generate realistic addresses based on chain with proper validation
+            if chain == "solana":
+                # For Solana, create a proper mock address that passes validation
+                # Solana addresses are typically 32-44 chars, but our validation expects Ethereum format
+                # So we'll create Ethereum-style addresses for Solana tokens for testing
+                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+            else:
+                # Ethereum/Base addresses (standard format)
+                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+            
+            # Validate the address format before proceeding
+            if not test_address or len(test_address) != 42 or not test_address.startswith('0x'):
+                self.logger.warning(f"Generated invalid address format: {test_address}")
+                # Fallback to a known good format
+                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+            
+            # Create token info with address validation
+            try:
+                token_info = TokenInfo(
+                    address=test_address,
+                    symbol=symbol,
+                    name=name,
+                    decimals=18,
+                    total_supply=random.randint(100_000_000, 10_000_000_000)
+                )
+            except ValueError as e:
+                self.logger.error(f"Failed to create TokenInfo with address {test_address}: {e}")
+                return None
+            
+            # Generate realistic liquidity
+            liquidity_usd = random.uniform(1000, 500000)
+            
+            # Create liquidity info
+            dex_names = {
+                "ethereum": ["Uniswap V2", "Uniswap V3", "SushiSwap"],
+                "base": ["BaseSwap", "Uniswap V3", "PancakeSwap"],
+                "solana": ["Raydium", "Orca", "Jupiter"]
+            }
+            
+            liquidity_info = LiquidityInfo(
+                pair_address=test_address,
+                dex_name=random.choice(dex_names[chain]),
+                token0=test_address,
+                token1="0x0000000000000000000000000000000000000000" if chain != "solana" else "0x" + "1" * 40,  # Use valid format for Solana too
+                reserve0=float(liquidity_usd / 2),
+                reserve1=float(liquidity_usd / 2),
+                liquidity_usd=liquidity_usd,
+                created_at=datetime.now() - timedelta(minutes=random.randint(1, 60)),
+                block_number=random.randint(18000000, 19000000)
+            )
+            
+            # Create contract analysis
+            contract_analysis = ContractAnalysis(
+                is_honeypot=random.choice([True, False]),
+                is_mintable=random.choice([True, False]),
+                is_pausable=random.choice([True, False]),
+                has_blacklist=random.choice([True, False]),
+                ownership_renounced=random.choice([True, False]),
+                liquidity_locked=random.choice([True, False]),
+                lock_duration=random.randint(30, 365) * 24 * 3600 if random.choice([True, False]) else None,
+                risk_score=random.uniform(0.1, 0.9),
+                risk_level=random.choice(list(RiskLevel)),
+                analysis_notes=[
+                    random.choice([
+                        "Standard ERC-20 contract",
+                        "Custom token with additional features",
+                        "Fork of popular token contract",
+                        "Verified contract on blockchain explorer",
+                        "High transaction volume detected"
+                    ])
+                ]
+            )
+            
+            # Create social metrics
+            social_metrics = SocialMetrics(
+                twitter_followers=random.randint(100, 50000) if random.choice([True, False]) else None,
+                telegram_members=random.randint(50, 10000) if random.choice([True, False]) else None,
+                discord_members=random.randint(20, 5000) if random.choice([True, False]) else None,
+                reddit_subscribers=random.randint(10, 2000) if random.choice([True, False]) else None,
+                website_url=f"https://{symbol.lower()}.com" if random.choice([True, False]) else None,
+                social_score=random.uniform(0.1, 1.0),
+                sentiment_score=random.uniform(-0.5, 0.8)
+            )
+            
+            # Create realistic metadata
+            confidence_levels = ['LOW', 'MEDIUM', 'HIGH']
+            actions = ['BUY', 'MONITOR', 'HOLD', 'AVOID']
+            risk_levels = ['low', 'medium', 'high', 'critical']
+            
+            metadata = {
+                'chain': chain,
+                'source': 'test_generator',
+                'is_test': True,
+                'recommendation': {
+                    'action': random.choice(actions),
+                    'confidence': random.choice(confidence_levels),
+                    'reasoning': random.choice([
+                        'Strong social metrics and community',
+                        'High liquidity and trading volume',
+                        'Verified contract with good tokenomics',
+                        'Trending on social media platforms',
+                        'Low risk score with locked liquidity',
+                        'Active development team'
+                    ])
+                },
+                'trading_score': {
+                    'overall_score': random.uniform(0.2, 0.95),
+                    'risk_score': random.uniform(0.1, 0.8),
+                    'liquidity_score': random.uniform(0.3, 1.0),
+                    'volatility_score': random.uniform(0.1, 0.9),
+                    'social_score': social_metrics.social_score,
+                    'technical_score': random.uniform(0.2, 0.8)
+                },
+                'risk_level': random.choice(risk_levels),
+                'analysis_timestamp': datetime.now().isoformat(),
+                'market_cap_usd': liquidity_usd * random.uniform(2, 50),
+                'volume_24h_usd': liquidity_usd * random.uniform(0.1, 5),
+                'price_change_24h': random.uniform(-50, 200),
+                'holder_count': random.randint(100, 10000),
+                'contract_verified': random.choice([True, False])
+            }
+            
+            # Create trading opportunity
+            opportunity = TradingOpportunity(
+                token=token_info,
+                liquidity=liquidity_info,
+                contract_analysis=contract_analysis,
+                social_metrics=social_metrics,
+                detected_at=datetime.now(),
+                metadata=metadata
+            )
+            
+            # Set additional attributes
+            opportunity.chain = chain
+            opportunity.confidence_score = metadata['trading_score']['overall_score']
+            
+            return opportunity
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create test opportunity: {e}")
+            return None
+
+
+
+
+
+
+
+
+
+
+
 
     async def start(self) -> None:
         """

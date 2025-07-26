@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Fixed OpportunityHandler with proper error handling and data type validation.
+Complete OpportunityHandler with proper error handling, data type validation, and test generation.
 
 File: core/opportunity_handler.py
-Class: OpportunityHandler  
-Method: handle_opportunity - Fixed metadata.get() usage and chain validation
+Class: OpportunityHandler
+Methods: handle_opportunity, generate_test_opportunities, dashboard integration
 """
 
 import asyncio
 import random
 import json
 from typing import Dict, List, Optional, Any, Union, Set
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from models.token import TradingOpportunity, TokenInfo, LiquidityInfo, ContractAnalysis, SocialMetrics, RiskLevel
@@ -174,6 +174,15 @@ class OpportunityHandler:
                     await self.trading_system.telegram_manager.handle_opportunity_error(error_symbol, opportunity)
             except Exception as telegram_error:
                 self.logger.error(f"Failed to send error notification: {telegram_error}")
+
+    async def handle_new_opportunity(self, opportunity: TradingOpportunity) -> None:
+        """
+        Alias for handle_opportunity to maintain compatibility.
+        
+        Args:
+            opportunity: Trading opportunity from monitors
+        """
+        await self.handle_opportunity(opportunity)
 
     def _ensure_timestamp_safe(self, opportunity: TradingOpportunity) -> datetime:
         """
@@ -616,4 +625,356 @@ class OpportunityHandler:
                 
         except Exception as e:
             self.logger.warning(f"Telegram notification failed: {e}")
+            # Don't re-raise, just log and continue
+
+    # =============================================================================
+    # TEST OPPORTUNITY GENERATION METHODS
+    # =============================================================================
+
+    async def generate_test_opportunities(self, count: int = 20, interval: float = 3.0) -> None:
+        """
+        Generate test opportunities for dashboard testing with realistic data.
+        
+        Args:
+            count: Number of test opportunities to generate
+            interval: Seconds between each opportunity
+        """
+        try:
+            self.logger.info(f"🧪 Starting test opportunity generation: {count} opportunities every {interval}s")
             
+            # Generate opportunities continuously
+            opportunity_count = 0
+            
+            while opportunity_count < count:
+                try:
+                    # Create test opportunity
+                    opportunity = await self._create_realistic_test_opportunity()
+                    
+                    if opportunity:
+                        opportunity_count += 1
+                        self.logger.info(f"📊 Generated test opportunity #{opportunity_count}: {opportunity.token.symbol}")
+                        
+                        # Process through the normal pipeline
+                        await self.handle_opportunity(opportunity)
+                        
+                        # Wait before next opportunity
+                        if opportunity_count < count:
+                            await asyncio.sleep(interval)
+                    
+                except Exception as e:
+                        self.logger.error(f"Error generating test opportunity #{opportunity_count + 1}: {e}")
+                        
+            self.logger.info(f"✅ Test opportunity generation completed: {opportunity_count} opportunities created")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate test opportunities: {e}")
+
+    async def _create_realistic_test_opportunity(self) -> Optional[TradingOpportunity]:
+        """
+        Create a realistic test opportunity with varied data.
+        
+        Returns:
+            Optional[TradingOpportunity]: Test opportunity or None if creation failed
+        """
+        try:
+            # Define realistic test tokens
+            test_tokens = [
+                ("DOGE2", "DogeClassic", "ethereum"),
+                ("PEPE", "PepeCoin", "ethereum"), 
+                ("FLOKI", "Floki", "base"),
+                ("SHIB2", "ShibaInu2", "base"),
+                ("WIF", "dogwifhat", "solana"),
+                ("BONK2", "Bonk2", "solana"),
+                ("MEME", "MemeCoin", "ethereum"),
+                ("CHAD", "ChadCoin", "base"),
+                ("MOON", "MoonToken", "solana"),
+                ("ROCKET", "RocketCoin", "ethereum"),
+                ("DIAMOND", "DiamondHands", "base"),
+                ("HODL", "HodlToken", "solana"),
+                ("LAMBO", "LamboCoin", "ethereum"),
+                ("APE2", "ApeToken2", "base"),
+                ("CATS", "CatsCoin", "solana")
+            ]
+            
+            # Select random token
+            symbol, name, chain = random.choice(test_tokens)
+            
+            # Generate realistic addresses based on chain
+            if chain == "solana":
+                # Solana addresses are base58 encoded, ~44 characters
+                test_address = f"{random.randint(100000, 999999)}{''.join(random.choices('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz', k=37))}"
+            else:
+                # Ethereum/Base addresses
+                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+            
+            # Create token info
+            token_info = TokenInfo(
+                address=test_address,
+                symbol=symbol,
+                name=name,
+                decimals=18,
+                total_supply=random.randint(100_000_000, 10_000_000_000)
+            )
+            
+            # Generate realistic liquidity
+            liquidity_usd = random.uniform(1000, 500000)
+            
+            # Create liquidity info
+            dex_names = {
+                "ethereum": ["Uniswap V2", "Uniswap V3", "SushiSwap"],
+                "base": ["BaseSwap", "Uniswap V3", "PancakeSwap"],
+                "solana": ["Raydium", "Orca", "Jupiter"]
+            }
+            
+            liquidity_info = LiquidityInfo(
+                pair_address=test_address,
+                dex_name=random.choice(dex_names[chain]),
+                token0=test_address,
+                token1="0x0000000000000000000000000000000000000000" if chain != "solana" else "So11111111111111111111111111111111111111112",
+                reserve0=float(liquidity_usd / 2),
+                reserve1=float(liquidity_usd / 2),
+                liquidity_usd=liquidity_usd,
+                created_at=datetime.now() - timedelta(minutes=random.randint(1, 60)),
+                block_number=random.randint(18000000, 19000000)
+            )
+            
+            # Create contract analysis
+            contract_analysis = ContractAnalysis(
+                is_honeypot=random.choice([True, False]),
+                is_mintable=random.choice([True, False]),
+                is_pausable=random.choice([True, False]),
+                has_blacklist=random.choice([True, False]),
+                ownership_renounced=random.choice([True, False]),
+                liquidity_locked=random.choice([True, False]),
+                lock_duration=random.randint(30, 365) * 24 * 3600 if random.choice([True, False]) else None,
+                risk_score=random.uniform(0.1, 0.9),
+                risk_level=random.choice(list(RiskLevel)),
+                analysis_notes=[
+                    random.choice([
+                        "Standard ERC-20 contract",
+                        "Custom token with additional features",
+                        "Fork of popular token contract",
+                        "Verified contract on blockchain explorer",
+                        "High transaction volume detected"
+                    ])
+                ]
+            )
+            
+            # Create social metrics
+            social_metrics = SocialMetrics(
+                twitter_followers=random.randint(100, 50000) if random.choice([True, False]) else None,
+                telegram_members=random.randint(50, 10000) if random.choice([True, False]) else None,
+                discord_members=random.randint(20, 5000) if random.choice([True, False]) else None,
+                reddit_subscribers=random.randint(10, 2000) if random.choice([True, False]) else None,
+                website_url=f"https://{symbol.lower()}.com" if random.choice([True, False]) else None,
+                social_score=random.uniform(0.1, 1.0),
+                sentiment_score=random.uniform(-0.5, 0.8)
+            )
+            
+            # Create realistic metadata
+            confidence_levels = ['LOW', 'MEDIUM', 'HIGH']
+            actions = ['BUY', 'MONITOR', 'HOLD', 'AVOID']
+            risk_levels = ['low', 'medium', 'high', 'critical']
+            
+            metadata = {
+                'chain': chain,
+                'source': 'test_generator',
+                'is_test': True,
+                'recommendation': {
+                    'action': random.choice(actions),
+                    'confidence': random.choice(confidence_levels),
+                    'reasoning': random.choice([
+                        'Strong social metrics and community',
+                        'High liquidity and trading volume',
+                        'Verified contract with good tokenomics',
+                        'Trending on social media platforms',
+                        'Low risk score with locked liquidity',
+                        'Active development team'
+                    ])
+                },
+                'trading_score': {
+                    'overall_score': random.uniform(0.2, 0.95),
+                    'risk_score': random.uniform(0.1, 0.8),
+                    'liquidity_score': random.uniform(0.3, 1.0),
+                    'volatility_score': random.uniform(0.1, 0.9),
+                    'social_score': social_metrics.social_score,
+                    'technical_score': random.uniform(0.2, 0.8)
+                },
+                'risk_level': random.choice(risk_levels),
+                'analysis_timestamp': datetime.now().isoformat(),
+                'market_cap_usd': liquidity_usd * random.uniform(2, 50),
+                'volume_24h_usd': liquidity_usd * random.uniform(0.1, 5),
+                'price_change_24h': random.uniform(-50, 200),
+                'holder_count': random.randint(100, 10000),
+                'contract_verified': random.choice([True, False])
+            }
+            
+            # Create trading opportunity
+            opportunity = TradingOpportunity(
+                token=token_info,
+                liquidity=liquidity_info,
+                contract_analysis=contract_analysis,
+                social_metrics=social_metrics,
+                detected_at=datetime.now(),
+                metadata=metadata
+            )
+            
+            # Set additional attributes
+            opportunity.chain = chain
+            opportunity.confidence_score = metadata['trading_score']['overall_score']
+            
+            return opportunity
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create test opportunity: {e}")
+            return None
+
+    async def start_continuous_test_generation(self, opportunities_per_minute: int = 5) -> None:
+        """
+        Start continuous test opportunity generation for extended testing.
+        
+        Args:
+            opportunities_per_minute: Rate of opportunity generation
+        """
+        try:
+            interval = 60.0 / opportunities_per_minute  # Calculate interval
+            self.logger.info(f"🔄 Starting continuous test generation: {opportunities_per_minute} opportunities/minute")
+            
+            opportunity_count = 0
+            
+            while True:
+                try:
+                    opportunity = await self._create_realistic_test_opportunity()
+                    
+                    if opportunity:
+                        opportunity_count += 1
+                        self.logger.info(f"📊 Generated continuous opportunity #{opportunity_count}: {opportunity.token.symbol}")
+                        
+                        # Process through the normal pipeline
+                        await self.handle_opportunity(opportunity)
+                        
+                    # Wait for next opportunity
+                    await asyncio.sleep(interval)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in continuous generation: {e}")
+                    await asyncio.sleep(interval)  # Continue despite errors
+                    
+        except Exception as e:
+            self.logger.error(f"Continuous test generation failed: {e}")
+
+    async def generate_specific_test_scenario(self, scenario: str = "high_risk") -> None:
+        """
+        Generate specific test scenarios for targeted testing.
+        
+        Args:
+            scenario: Type of scenario to generate
+        """
+        try:
+            self.logger.info(f"🎭 Generating test scenario: {scenario}")
+            
+            if scenario == "high_risk":
+                await self._generate_high_risk_scenarios()
+            elif scenario == "high_confidence":
+                await self._generate_high_confidence_scenarios()
+            elif scenario == "mixed_chain":
+                await self._generate_mixed_chain_scenarios()
+            elif scenario == "low_liquidity":
+                await self._generate_low_liquidity_scenarios()
+            else:
+                self.logger.warning(f"Unknown scenario: {scenario}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate scenario {scenario}: {e}")
+
+    async def _generate_high_risk_scenarios(self) -> None:
+        """Generate high-risk test opportunities."""
+        risk_tokens = [
+            ("RISK", "RiskyToken", "ethereum"),
+            ("SCAM", "ScamCoin", "base"), 
+            ("HONEY", "HoneyPot", "solana")
+        ]
+        
+        for symbol, name, chain in risk_tokens:
+            opportunity = await self._create_realistic_test_opportunity()
+            if opportunity:
+                # Modify to be high risk
+                opportunity.token.symbol = symbol
+                opportunity.token.name = name
+                opportunity.chain = chain
+                opportunity.metadata['chain'] = chain
+                opportunity.metadata['risk_level'] = 'critical'
+                opportunity.metadata['recommendation']['action'] = 'AVOID'
+                opportunity.metadata['recommendation']['confidence'] = 'HIGH'
+                opportunity.contract_analysis.is_honeypot = True
+                opportunity.contract_analysis.risk_score = 0.9
+                opportunity.contract_analysis.risk_level = RiskLevel.CRITICAL
+                
+                await self.handle_opportunity(opportunity)
+                await asyncio.sleep(2)
+
+    async def _generate_high_confidence_scenarios(self) -> None:
+        """Generate high-confidence test opportunities."""
+        good_tokens = [
+            ("SAFE", "SafeToken", "ethereum"),
+            ("GOLD", "GoldCoin", "base"),
+            ("STABLE", "StableCoin", "solana")
+        ]
+        
+        for symbol, name, chain in good_tokens:
+            opportunity = await self._create_realistic_test_opportunity()
+            if opportunity:
+                # Modify to be high confidence
+                opportunity.token.symbol = symbol
+                opportunity.token.name = name
+                opportunity.chain = chain
+                opportunity.metadata['chain'] = chain
+                opportunity.metadata['risk_level'] = 'low'
+                opportunity.metadata['recommendation']['action'] = 'BUY'
+                opportunity.metadata['recommendation']['confidence'] = 'HIGH'
+                opportunity.contract_analysis.is_honeypot = False
+                opportunity.contract_analysis.ownership_renounced = True
+                opportunity.contract_analysis.liquidity_locked = True
+                opportunity.contract_analysis.risk_score = 0.1
+                opportunity.contract_analysis.risk_level = RiskLevel.LOW
+                opportunity.liquidity.liquidity_usd = random.uniform(100000, 1000000)
+                
+                await self.handle_opportunity(opportunity)
+                await asyncio.sleep(2)
+
+    async def _generate_mixed_chain_scenarios(self) -> None:
+        """Generate opportunities across all chains."""
+        chains = ["ethereum", "base", "solana"]
+        
+        for i, chain in enumerate(chains):
+            opportunity = await self._create_realistic_test_opportunity()
+            if opportunity:
+                opportunity.chain = chain
+                opportunity.metadata['chain'] = chain
+                opportunity.token.symbol = f"MULTI{i+1}"
+                opportunity.token.name = f"MultiChain{i+1}"
+                
+                await self.handle_opportunity(opportunity)
+                await asyncio.sleep(2)
+
+    async def _generate_low_liquidity_scenarios(self) -> None:
+        """Generate low liquidity test opportunities."""
+        low_liq_tokens = [
+            ("MICRO", "MicroCap", "ethereum"),
+            ("TINY", "TinyToken", "base"),
+            ("SMALL", "SmallCoin", "solana")
+        ]
+        
+        for symbol, name, chain in low_liq_tokens:
+            opportunity = await self._create_realistic_test_opportunity()
+            if opportunity:
+                # Modify to have low liquidity
+                opportunity.token.symbol = symbol
+                opportunity.token.name = name
+                opportunity.chain = chain
+                opportunity.metadata['chain'] = chain
+                opportunity.liquidity.liquidity_usd = random.uniform(500, 5000)  # Low liquidity
+                opportunity.metadata['trading_score']['liquidity_score'] = random.uniform(0.1, 0.3)
+                
+                await self.handle_opportunity(opportunity)
+                await asyncio.sleep(2)
