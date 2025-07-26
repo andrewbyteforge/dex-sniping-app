@@ -10,6 +10,7 @@ import asyncio
 import sys
 import os
 import argparse
+import random
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -257,12 +258,12 @@ class EnhancedTradingSystem:
             
             # Trading scorer for opportunity ranking
             try:
-                self.analyzers['scorer'] = TradingScorer()
+                self.analyzers['trading_scorer'] = TradingScorer()
                 # TradingScorer doesn't need initialize method
                 self.logger.info("✅ TradingScorer initialized")
             except Exception as e:
                 self.logger.warning(f"TradingScorer initialization failed: {e}")
-                self.analyzers['scorer'] = None
+                self.analyzers['trading_scorer'] = None
             
             # Count successful initializations
             active_analyzers = len([a for a in self.analyzers.values() if a is not None])
@@ -271,14 +272,14 @@ class EnhancedTradingSystem:
         except Exception as e:
             self.logger.error(f"Failed to initialize analyzers: {e}")
             # Don't raise - continue without analyzers
-            self.analyzers = {'contract': None, 'social': None, 'scorer': None}
+            self.analyzers = {'contract': None, 'social': None, 'trading_scorer': None}
 
     async def _initialize_monitors(self) -> None:
-        """Initialize blockchain monitors."""
+        """Enhanced monitor initialization with better callback handling."""
         try:
             self.logger.info("Initializing blockchain monitors...")
             
-            # Ethereum monitor - no parameters needed
+            # Ethereum monitor
             try:
                 eth_monitor = NewTokenMonitor()
                 eth_monitor.add_callback(self._handle_opportunity)
@@ -287,7 +288,7 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Ethereum monitor failed: {e}")
             
-            # Base chain monitor - no parameters needed
+            # Base chain monitor
             try:
                 base_monitor = BaseChainMonitor()
                 base_monitor.add_callback(self._handle_opportunity)
@@ -296,15 +297,23 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Base monitor failed: {e}")
             
-            # Solana monitors - no parameters needed
+            # Solana monitor with enhanced settings
             try:
-                sol_monitor = SolanaMonitor()
+                sol_monitor = SolanaMonitor(check_interval=10.0)  # Slower for stability
                 sol_monitor.add_callback(self._handle_opportunity)
+                
+                # Set additional properties if available
+                if hasattr(sol_monitor, 'set_scorer') and hasattr(self, 'analyzers'):
+                    sol_monitor.set_scorer(self.analyzers.get('trading_scorer'))
+                if hasattr(sol_monitor, 'set_auto_trading'):
+                    sol_monitor.set_auto_trading(self.auto_trading_enabled)
+                
                 self.monitors.append(sol_monitor)
                 self.logger.info("✅ Solana monitor initialized")
             except Exception as e:
                 self.logger.warning(f"Solana monitor failed: {e}")
             
+            # Jupiter monitor
             try:
                 jupiter_monitor = JupiterSolanaMonitor()
                 jupiter_monitor.add_callback(self._handle_opportunity)
@@ -319,6 +328,10 @@ class EnhancedTradingSystem:
             if active_monitors == 0:
                 self.logger.error("No monitors initialized successfully")
                 raise Exception("Failed to initialize any monitors")
+            
+            # Start test opportunity generation for dashboard verification
+            self.logger.info("🧪 Starting test opportunity generation...")
+            asyncio.create_task(self._generate_test_opportunities())
             
         except Exception as e:
             self.logger.error(f"Failed to initialize monitors: {e}")
@@ -395,13 +408,26 @@ class EnhancedTradingSystem:
 
     async def _handle_opportunity(self, opportunity: TradingOpportunity) -> None:
         """
-        Handle new trading opportunity with enhanced analysis and execution.
+        Enhanced opportunity handler with robust dashboard integration.
         
         Args:
-            opportunity: Trading opportunity to process
+            opportunity: Trading opportunity from monitors
         """
         try:
+            # Validate opportunity structure
+            if not opportunity or not hasattr(opportunity, 'token'):
+                self.logger.warning("Invalid opportunity received - skipping")
+                return
+
+            token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN')
+            token_address = getattr(opportunity.token, 'address', 'UNKNOWN')
+            
+            self.logger.info(f"🔍 Processing opportunity: {token_symbol} ({token_address[:10]}...)")
+            
             # Ensure opportunity has required attributes
+            if not hasattr(opportunity, 'metadata') or not opportunity.metadata:
+                opportunity.metadata = {}
+                
             if not hasattr(opportunity, 'chain') or not opportunity.chain:
                 # Try to infer chain from metadata or set default
                 opportunity.chain = opportunity.metadata.get('chain', 'ethereum')
@@ -424,40 +450,308 @@ class EnhancedTradingSystem:
             if not hasattr(opportunity.token, 'price'):
                 opportunity.token.price = 1.0  # Default price
             
-            # Update statistics
+            # Update analysis statistics
             self.analysis_stats["total_analyzed"] += 1
-            chain = opportunity.chain.lower()
+            
+            # Track by chain
+            chain = opportunity.metadata.get('chain', 'unknown').lower()
             if chain in self.opportunities_by_chain:
                 self.opportunities_by_chain[chain] += 1
             
-            token_symbol = opportunity.token.symbol or "UNKNOWN"
-            self.logger.debug(f"🔍 Processing opportunity: {token_symbol} on {opportunity.chain}")
-            
-            # Comprehensive analysis
+            # Perform comprehensive analysis
             enhanced_opportunity = await self._analyze_opportunity(opportunity)
             
-            # Trading execution decision
-            if self.trading_executor and self.auto_trading_enabled:
-                decision = await self.trading_executor.evaluate_opportunity(enhanced_opportunity)
-                
-                # Update execution metrics
-                self.execution_metrics["opportunities_assessed"] += 1
-                
-                if decision == ExecutionDecision.EXECUTE:
-                    self.execution_metrics["trades_approved"] += 1
-                elif decision == ExecutionDecision.REJECT:
-                    self.execution_metrics["trades_rejected"] += 1
-                
-                self.logger.debug(f"📊 Trading decision for {token_symbol}: {decision.value}")
+            # Execute trading logic if enabled
+            if self.auto_trading_enabled and self.trading_executor:
+                try:
+                    decision = await self.trading_executor.assess_opportunity(enhanced_opportunity)
+                    self.execution_metrics["opportunities_assessed"] += 1
+                    
+                    if hasattr(decision, 'value'):
+                        decision_value = decision.value
+                    else:
+                        decision_value = str(decision)
+                    
+                    if decision_value == "EXECUTE":
+                        self.execution_metrics["trades_approved"] += 1
+                        self.logger.info(f"✅ Trade approved for {token_symbol}")
+                    elif decision_value == "REJECT":
+                        self.execution_metrics["trades_rejected"] += 1
+                        self.logger.debug(f"❌ Trade rejected for {token_symbol}")
+                    
+                except Exception as trading_error:
+                    self.logger.error(f"Trading assessment failed for {token_symbol}: {trading_error}")
             
-            # Add to dashboard
-            await self._add_to_dashboard_safe(enhanced_opportunity)
+            # **CRITICAL FIX**: Always add to dashboard, regardless of trading mode
+            await self._add_to_dashboard_guaranteed(enhanced_opportunity)
+            
+            # Log successful processing
+            self.logger.debug(f"✅ Successfully processed opportunity: {token_symbol}")
             
         except Exception as e:
             token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN') if hasattr(opportunity, 'token') else 'UNKNOWN'
             self.logger.error(f"Error handling opportunity {token_symbol}: {e}")
             import traceback
             self.logger.debug(f"Full traceback: {traceback.format_exc()}")
+
+    async def _add_to_dashboard_guaranteed(self, opportunity: TradingOpportunity) -> None:
+        """
+        Guaranteed dashboard update with comprehensive error handling.
+        
+        Args:
+            opportunity: Trading opportunity to add to dashboard
+        """
+        try:
+            # Skip if dashboard is disabled
+            if self.disable_dashboard:
+                return
+                
+            # Method 1: Try dashboard server add_opportunity method
+            if hasattr(self, 'dashboard_server') and self.dashboard_server:
+                try:
+                    await self.dashboard_server.add_opportunity(opportunity)
+                    self.logger.debug(f"✅ Dashboard updated via server: {opportunity.token.symbol}")
+                    return  # Success - exit early
+                except Exception as server_error:
+                    self.logger.warning(f"Dashboard server update failed: {server_error}")
+            
+            # Method 2: Manual dashboard update as fallback
+            if hasattr(self, 'dashboard_server') and self.dashboard_server:
+                try:
+                    await self._manual_dashboard_update(opportunity)
+                    self.logger.debug(f"✅ Dashboard updated manually: {opportunity.token.symbol}")
+                    return
+                except Exception as manual_error:
+                    self.logger.warning(f"Manual dashboard update failed: {manual_error}")
+            
+            # Method 3: Log the failure but don't break the system
+            self.logger.warning(f"All dashboard update methods failed for {opportunity.token.symbol}")
+            
+        except Exception as e:
+            # Final safety net - never let dashboard errors break opportunity processing
+            self.logger.error(f"Critical dashboard update error: {e}")
+
+    async def _manual_dashboard_update(self, opportunity: TradingOpportunity) -> None:
+        """
+        Manual dashboard update as fallback method.
+        
+        Args:
+            opportunity: Trading opportunity to broadcast
+        """
+        try:
+            # Extract data safely with defaults
+            token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN')
+            token_address = getattr(opportunity.token, 'address', '')
+            chain = opportunity.metadata.get('chain', 'ethereum')
+            
+            # Extract liquidity info safely
+            liquidity_usd = 0.0
+            if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
+                liquidity_usd = float(getattr(opportunity.liquidity, 'liquidity_usd', 0))
+            
+            # Create opportunity data structure
+            opp_data = {
+                "token_symbol": token_symbol,
+                "token_address": token_address,
+                "chain": chain.lower(),
+                "risk_level": opportunity.metadata.get("risk_level", "unknown"),
+                "recommendation": opportunity.metadata.get("recommendation", {}).get("action", "MONITOR"),
+                "confidence": opportunity.metadata.get("recommendation", {}).get("confidence", "LOW"),
+                "score": opportunity.metadata.get("trading_score", {}).get("overall_score", 0.0),
+                "liquidity_usd": liquidity_usd,
+                "detected_at": datetime.now().isoformat(),
+                "age_minutes": 0
+            }
+            
+            # Update dashboard stats manually
+            if hasattr(self.dashboard_server, 'stats'):
+                self.dashboard_server.stats["total_opportunities"] += 1
+                
+                if opp_data["confidence"] == "HIGH":
+                    self.dashboard_server.stats["high_confidence"] += 1
+            
+            # Add to opportunities queue manually
+            if hasattr(self.dashboard_server, 'opportunities_queue'):
+                self.dashboard_server.opportunities_queue.append(opportunity)
+                
+                # Keep queue size manageable
+                if len(self.dashboard_server.opportunities_queue) > 100:
+                    self.dashboard_server.opportunities_queue.pop(0)
+            
+            # Broadcast to WebSocket clients
+            if hasattr(self.dashboard_server, 'broadcast_message'):
+                await self.dashboard_server.broadcast_message({
+                    "type": "new_opportunity",
+                    "data": opp_data
+                })
+            
+            self.logger.debug(f"Manual dashboard update successful: {token_symbol}")
+            
+        except Exception as e:
+            self.logger.error(f"Manual dashboard update failed: {e}")
+            raise
+
+    async def _generate_test_opportunities(self) -> None:
+        """
+        Generate test opportunities for dashboard testing.
+        This helps verify that the dashboard integration is working.
+        """
+        try:
+            await asyncio.sleep(15)  # Wait for system to fully initialize
+            
+            self.logger.info("🧪 Generating test opportunities for dashboard verification...")
+            
+            # Generate test opportunities to verify dashboard
+            test_tokens = [
+                ("TESTMEME", "ethereum", 150000.0),
+                ("MOCKCOIN", "solana", 75000.0), 
+                ("BASETEST", "base", 200000.0)
+            ]
+            
+            for i, (symbol, chain, liquidity) in enumerate(test_tokens):
+                try:
+                    await asyncio.sleep(10)  # Stagger opportunities
+                    
+                    # Create test opportunity
+                    test_opportunity = await self._create_test_opportunity(symbol, chain, liquidity)
+                    
+                    if test_opportunity:
+                        # Process through normal pipeline
+                        await self._handle_opportunity(test_opportunity)
+                        self.logger.info(f"🧪 Test opportunity {i+1}/3 processed: {symbol}")
+                    
+                except Exception as test_error:
+                    self.logger.error(f"Test opportunity {i+1} failed: {test_error}")
+            
+            self.logger.info("🧪 Test opportunity generation completed")
+            
+        except Exception as e:
+            self.logger.error(f"Test opportunity generation failed: {e}")
+
+    async def _create_test_opportunity(self, symbol: str, chain: str, liquidity: float) -> Optional[TradingOpportunity]:
+        """
+        Create a test trading opportunity for dashboard testing.
+        
+        Args:
+            symbol: Token symbol
+            chain: Blockchain name
+            liquidity: Liquidity amount in USD
+            
+        Returns:
+            TradingOpportunity or None if creation fails
+        """
+        try:
+            from models.token import TokenInfo, LiquidityInfo, ContractAnalysis, SocialMetrics
+            
+            # Generate test address based on chain
+            if chain == "solana":
+                # Solana addresses don't follow 0x format and have different validation
+                test_address = f"{symbol}{''.join(random.choices('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz', k=40))}"
+            else:
+                # EVM chains (Ethereum, Base) use 0x format
+                test_address = f"0x{''.join(random.choices('0123456789abcdef', k=40))}"
+            
+            # Create test token info - NOTE: discovered_at is NOT a TokenInfo parameter
+            if chain == "solana":
+                # For Solana, we need to create a custom token-like object since TokenInfo validates for 0x format
+                class SolanaTokenInfo:
+                    def __init__(self, address, symbol, name, decimals=9, total_supply=1000000000):
+                        self.address = address
+                        self.symbol = symbol
+                        self.name = name
+                        self.decimals = decimals
+                        self.total_supply = total_supply
+                        self.price = 1.0  # Default price
+                
+                token_info = SolanaTokenInfo(
+                    address=test_address,
+                    symbol=symbol,
+                    name=f"Test {symbol}",
+                    decimals=9,  # Common for Solana
+                    total_supply=1000000000
+                )
+            else:
+                # For EVM chains, use regular TokenInfo
+                token_info = TokenInfo(
+                    address=test_address,
+                    symbol=symbol,
+                    name=f"Test {symbol}",
+                    decimals=18,
+                    total_supply=1000000000
+                )
+            
+            # Create test liquidity info  
+            liquidity_info = LiquidityInfo(
+                pair_address=test_address,
+                dex_name=f"Test DEX ({chain})",
+                token0=test_address,
+                token1="0x0000000000000000000000000000000000000000" if chain != "solana" else "So11111111111111111111111111111111111111112",
+                reserve0=float(liquidity / 2),
+                reserve1=float(liquidity / 2),
+                liquidity_usd=liquidity,
+                created_at=datetime.now(),
+                block_number=0
+            )
+            
+            # Create test contract analysis
+            contract_analysis = ContractAnalysis(
+                is_honeypot=False,
+                is_mintable=random.choice([True, False]),
+                is_pausable=random.choice([True, False]),
+                has_blacklist=False,
+                ownership_renounced=random.choice([True, False]),
+                liquidity_locked=True,
+                lock_duration=86400 * 30,  # 30 days
+                risk_score=random.uniform(0.1, 0.6),
+                risk_level=RiskLevel.MEDIUM
+            )
+            
+            # Create test social metrics
+            social_metrics = SocialMetrics(
+                twitter_followers=random.randint(100, 10000),
+                telegram_members=random.randint(50, 5000),
+                social_score=random.uniform(0.3, 0.8),
+                sentiment_score=random.uniform(-0.5, 0.8)
+            )
+            
+            # Create test opportunity
+            opportunity = TradingOpportunity(
+                token=token_info,
+                liquidity=liquidity_info,
+                contract_analysis=contract_analysis,
+                social_metrics=social_metrics,
+                detected_at=datetime.now(),  # This IS a valid parameter for TradingOpportunity
+                confidence_score=random.uniform(0.3, 0.8),
+                metadata={
+                    'chain': chain,
+                    'source': 'test_generator',
+                    'is_test': True,
+                    'recommendation': {
+                        'action': random.choice(['BUY', 'MONITOR', 'HOLD']),
+                        'confidence': random.choice(['LOW', 'MEDIUM', 'HIGH'])
+                    },
+                    'trading_score': {
+                        'overall_score': random.uniform(0.2, 0.9),
+                        'risk_score': random.uniform(0.1, 0.7)
+                    }
+                }
+            )
+            
+            # Add chain information
+            opportunity.chain = chain
+            
+            return opportunity
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create test opportunity: {e}")
+            import traceback
+            self.logger.debug(f"Test opportunity creation traceback: {traceback.format_exc()}")
+            return None
+
+
+
+
+
 
     async def _analyze_opportunity(self, opportunity: TradingOpportunity) -> TradingOpportunity:
         """
@@ -504,7 +798,6 @@ class EnhancedTradingSystem:
                     enhanced_metadata['social_metrics'] = {'error': str(e)}
             else:
                 # Mock social analysis for testing
-                import random
                 enhanced_metadata['social_metrics'] = {
                     'sentiment': random.choice(['positive', 'neutral', 'negative']),
                     'volume_score': random.uniform(0.2, 0.8),
@@ -513,10 +806,10 @@ class EnhancedTradingSystem:
                 }
             
             # Trading score and recommendation
-            if self.analyzers.get('scorer'):
+            if self.analyzers.get('trading_scorer'):
                 try:
                     # TradingScorer.score_opportunity returns a float, not a coroutine
-                    trading_score_result = self.analyzers['scorer'].score_opportunity(opportunity)
+                    trading_score_result = self.analyzers['trading_scorer'].score_opportunity(opportunity)
                     
                     # Check if it's a coroutine and await if needed
                     if hasattr(trading_score_result, '__await__'):
@@ -574,7 +867,6 @@ class EnhancedTradingSystem:
                     enhanced_metadata['trading_score'] = {'error': str(e)}
             else:
                 # Mock trading score for testing
-                import random
                 action = random.choice(['BUY', 'HOLD', 'SELL', 'AVOID'])
                 confidence = random.choice(['HIGH', 'MEDIUM', 'LOW'])
                 
@@ -608,7 +900,7 @@ class EnhancedTradingSystem:
             )
             
             # Add chain as metadata since it's not a constructor parameter
-            enhanced_opportunity.metadata['chain'] = opportunity.chain
+            enhanced_opportunity.metadata['chain'] = getattr(opportunity, 'chain', 'ethereum')
             
             return enhanced_opportunity
             
@@ -666,20 +958,6 @@ class EnhancedTradingSystem:
                 
         except Exception as e:
             self.logger.error(f"Error handling trading alert: {e}")
-
-    async def _add_to_dashboard_safe(self, opportunity: TradingOpportunity) -> None:
-        """
-        Safely add opportunity to dashboard.
-        
-        Args:
-            opportunity: Trading opportunity to add
-        """
-        try:
-            if self.dashboard_server and not self.disable_dashboard:
-                await self.dashboard_server.add_opportunity(opportunity)
-        except Exception as e:
-            # Don't let dashboard errors stop the main system
-            self.logger.debug(f"Dashboard update failed: {e}")
 
     async def _system_monitoring_loop(self) -> None:
         """Main system monitoring and reporting loop."""
@@ -764,12 +1042,15 @@ class EnhancedTradingSystem:
             
             # Portfolio status
             if self.position_manager:
-                portfolio = self.trading_executor.get_portfolio_summary()
-                active_positions = portfolio.get('total_positions', 0)
-                total_exposure = portfolio.get('total_exposure_usd', 0)
-                
-                if active_positions > 0:
-                    self.logger.info(f"   PORTFOLIO: {active_positions} positions, ${total_exposure:.2f} exposure")
+                try:
+                    portfolio = self.trading_executor.get_portfolio_summary()
+                    active_positions = portfolio.get('total_positions', 0)
+                    total_exposure = portfolio.get('total_exposure_usd', 0)
+                    
+                    if active_positions > 0:
+                        self.logger.info(f"   PORTFOLIO: {active_positions} positions, ${total_exposure:.2f} exposure")
+                except Exception:
+                    pass  # Ignore portfolio errors in logging
             
             # Dashboard status
             if self.dashboard_server and not self.disable_dashboard:
@@ -896,8 +1177,11 @@ class EnhancedTradingSystem:
             
             # Add portfolio information if available
             if self.trading_executor:
-                portfolio = self.trading_executor.get_portfolio_summary()
-                status['portfolio'] = portfolio
+                try:
+                    portfolio = self.trading_executor.get_portfolio_summary()
+                    status['portfolio'] = portfolio
+                except Exception:
+                    status['portfolio'] = {'error': 'Portfolio data unavailable'}
             
             return status
             

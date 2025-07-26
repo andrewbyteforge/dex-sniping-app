@@ -559,18 +559,41 @@ class SolanaMonitor(BaseMonitor):
             TokenInfo object or None if creation failed
         """
         try:
-            return TokenInfo(
-                address=token_data.get('mint', ''),
-                name=token_data.get('name', 'Unknown'),
+            # For Solana tokens, we need to handle the address validation issue
+            # since TokenInfo expects 0x format but Solana uses different format
+            
+            mint_address = token_data.get('mint', '')
+            if not mint_address:
+                return None
+            
+            # Create a custom Solana token info object that doesn't have the 0x validation
+            class SolanaTokenInfo:
+                def __init__(self, address, symbol, name, decimals, total_supply):
+                    self.address = address
+                    self.symbol = symbol
+                    self.name = name
+                    self.decimals = decimals
+                    self.total_supply = total_supply
+                    
+            return SolanaTokenInfo(
+                address=mint_address,
                 symbol=token_data.get('symbol', 'UNK'),
+                name=token_data.get('name', 'Unknown'),
                 decimals=token_data.get('decimals', 9),  # Common for Solana
-                total_supply=token_data.get('total_supply', 0),
-                discovered_at=datetime.now()
+                total_supply=token_data.get('total_supply', 0)
             )
             
         except Exception as e:
             self.logger.error(f"Failed to create Solana token info: {e}")
             return None
+
+
+
+
+
+
+
+
 
     def _create_pump_fun_liquidity_info(self, token_data: Dict[str, Any]) -> Optional[LiquidityInfo]:
         """

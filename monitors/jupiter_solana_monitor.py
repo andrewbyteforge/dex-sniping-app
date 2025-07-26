@@ -5,7 +5,7 @@ Filters out known tokens and shows only potentially new opportunities.
 
 import asyncio
 import aiohttp
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -193,6 +193,87 @@ class JupiterSolanaMonitor(BaseMonitor):
             
         except Exception as e:
             self.logger.error(f"Error creating opportunity: {e}")
+            return None
+        
+    async def _create_opportunity_from_token(self, token_data: Dict[str, Any]) -> Optional[TradingOpportunity]:
+        """
+        Create a TradingOpportunity from Jupiter token data.
+        
+        Args:
+            token_data: Token data from Jupiter API
+            
+        Returns:
+            TradingOpportunity or None if creation failed
+        """
+        try:
+            # Create custom Solana token info (since TokenInfo validates for 0x format)
+            class SolanaTokenInfo:
+                def __init__(self, address, symbol, name, decimals, total_supply):
+                    self.address = address
+                    self.symbol = symbol
+                    self.name = name
+                    self.decimals = decimals
+                    self.total_supply = total_supply
+            
+            # FIXED: Remove discovered_at and other invalid parameters
+            token_info = SolanaTokenInfo(
+                address=token_data.get("address", ""),
+                symbol=token_data.get("symbol", "UNKNOWN"),
+                name=token_data.get("name", "Unknown Token"),
+                decimals=token_data.get("decimals", 9),
+                total_supply=1000000000  # Default
+            )
+            
+            # Create basic liquidity info
+            liquidity_info = LiquidityInfo(
+                pair_address=token_data.get("address", ""),
+                dex_name="Jupiter",
+                token0=token_data.get("address", ""),
+                token1="So11111111111111111111111111111111111111112",  # SOL
+                reserve0=0.0,
+                reserve1=0.0,
+                liquidity_usd=0.0,  # Would need additional API call
+                created_at=datetime.now(),
+                block_number=0
+            )
+            
+            # Create basic contract analysis
+            contract_analysis = ContractAnalysis(
+                is_honeypot=False,
+                is_mintable=False,
+                is_pausable=False,
+                ownership_renounced=False,
+                risk_score=0.0,
+                risk_level=RiskLevel.MEDIUM,
+                analysis_notes=["Jupiter verified token"]
+            )
+            
+            # Create basic social metrics
+            social_metrics = SocialMetrics(
+                twitter_followers=0,
+                telegram_members=0,
+                social_score=0.5,
+                sentiment_score=0.5
+            )
+            
+            # Create opportunity
+            opportunity = TradingOpportunity(
+                token=token_info,
+                liquidity=liquidity_info,
+                contract_analysis=contract_analysis,
+                social_metrics=social_metrics,
+                detected_at=datetime.now(),  # This IS valid for TradingOpportunity
+                metadata={
+                    "source": "jupiter",
+                    "chain": "solana",
+                    "jupiter_verified": True
+                }
+            )
+            
+            return opportunity
+            
+        except Exception as e:
+            self.logger.error(f"Error creating Jupiter opportunity: {e}")
             return None
     
     async def cleanup(self):
