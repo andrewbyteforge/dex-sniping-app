@@ -137,6 +137,9 @@ class DashboardServer:
         
         Args:
             opportunity: The trading opportunity to add
+            
+        Raises:
+            Exception: If opportunity processing fails
         """
         try:
             # Add to queue (keep last 100)
@@ -147,6 +150,7 @@ class DashboardServer:
             # Update stats
             self.stats["total_opportunities"] += 1
             
+            # Extract recommendation safely
             recommendation = opportunity.metadata.get("recommendation", {})
             if recommendation.get("confidence") == "HIGH":
                 self.stats["high_confidence"] += 1
@@ -155,104 +159,80 @@ class DashboardServer:
             try:
                 # Safely extract liquidity USD value
                 liquidity_usd = 0.0
-                if hasattr(opportunity.liquidity, 'liquidity_usd') and opportunity.liquidity.liquidity_usd:
-                    liquidity_usd = float(opportunity.liquidity.liquidity_usd)
+                if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
+                    if hasattr(opportunity.liquidity, 'liquidity_usd') and opportunity.liquidity.liquidity_usd:
+                        liquidity_usd = float(opportunity.liquidity.liquidity_usd)
                 
                 # Safely extract DEX name
                 dex_name = "Unknown DEX"
-                if hasattr(opportunity.liquidity, 'dex_name') and opportunity.liquidity.dex_name:
-                    dex_name = str(opportunity.liquidity.dex_name)
+                if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
+                    if hasattr(opportunity.liquidity, 'dex_name') and opportunity.liquidity.dex_name:
+                        dex_name = str(opportunity.liquidity.dex_name)
                 
                 # Safely extract pair address
                 pair_address = ""
-                if hasattr(opportunity.liquidity, 'pair_address') and opportunity.liquidity.pair_address:
-                    pair_address = str(opportunity.liquidity.pair_address)
+                if hasattr(opportunity, 'liquidity') and opportunity.liquidity:
+                    if hasattr(opportunity.liquidity, 'pair_address') and opportunity.liquidity.pair_address:
+                        pair_address = str(opportunity.liquidity.pair_address)
                 
-                # Safely extract block number
-                block_number = None
-                if hasattr(opportunity.liquidity, 'block_number') and opportunity.liquidity.block_number:
-                    block_number = int(opportunity.liquidity.block_number)
-                
-                # Safely extract token information
+                # Safely extract token info
                 token_symbol = "UNKNOWN"
-                if hasattr(opportunity.token, 'symbol') and opportunity.token.symbol:
-                    token_symbol = str(opportunity.token.symbol)
-                
                 token_address = ""
-                if hasattr(opportunity.token, 'address') and opportunity.token.address:
-                    token_address = str(opportunity.token.address)
+                if hasattr(opportunity, 'token') and opportunity.token:
+                    token_symbol = getattr(opportunity.token, 'symbol', 'UNKNOWN') or 'UNKNOWN'
+                    token_address = getattr(opportunity.token, 'address', '') or ''
                 
-                token_name = None
-                if hasattr(opportunity.token, 'name') and opportunity.token.name:
-                    token_name = str(opportunity.token.name)
+                # Safely extract chain
+                chain = opportunity.metadata.get('chain', 'ethereum').lower()
                 
-                # Safely extract analysis data
-                risk_level = "unknown"
-                if hasattr(opportunity.contract_analysis, 'risk_level') and opportunity.contract_analysis.risk_level:
-                    risk_level = str(opportunity.contract_analysis.risk_level.value)
+                # Safely extract risk level
+                risk_level = opportunity.metadata.get('risk_level', 'unknown')
                 
-                opp_data = {
+                # Safely extract scores
+                score = 0.0
+                try:
+                    if "score" in recommendation:
+                        score = float(recommendation["score"])
+                    elif "trading_score" in opportunity.metadata:
+                        trading_score = opportunity.metadata["trading_score"]
+                        if isinstance(trading_score, dict) and "overall_score" in trading_score:
+                            score = float(trading_score["overall_score"])
+                        else:
+                            score = float(trading_score)
+                except Exception:
+                    score = 0.0
+                
+                # Create broadcast data
+                broadcast_data = {
                     "token_symbol": token_symbol,
                     "token_address": token_address,
-                    "token_name": token_name,
-                    "chain": opportunity.metadata.get("chain", "ethereum"),
+                    "chain": chain,
                     "risk_level": risk_level,
-                    "recommendation": recommendation.get("action", "UNKNOWN"),
-                    "confidence": recommendation.get("confidence", "UNKNOWN"),
-                    "score": float(recommendation.get("score", 0.0)),
+                    "recommendation": recommendation.get("action", "MONITOR"),
+                    "confidence": recommendation.get("confidence", "LOW"),
+                    "score": score,
                     "liquidity_usd": liquidity_usd,
                     "dex_name": dex_name,
                     "pair_address": pair_address,
-                    "block_number": block_number,
-                    "detected_at": opportunity.detected_at.isoformat(),
-                    "reasons": recommendation.get("reasons", []),
-                    "warnings": recommendation.get("warnings", [])
+                    "detected_at": datetime.now().isoformat(),
+                    "age_minutes": 0
                 }
                 
-                # Add additional metadata if available
-                if "market_cap_usd" in opportunity.metadata:
-                    opp_data["market_cap_usd"] = float(opportunity.metadata["market_cap_usd"])
+                # Broadcast to connected clients
+                await self.broadcast_message({
+                    "type": "new_opportunity",
+                    "data": broadcast_data
+                })
                 
-                if "volume_24h_usd" in opportunity.metadata:
-                    opp_data["volume_24h_usd"] = float(opportunity.metadata["volume_24h_usd"])
+                self.logger.debug(f"✅ Opportunity added and broadcast: {token_symbol}")
                 
-                if "solana_source" in opportunity.metadata:
-                    opp_data["solana_source"] = str(opportunity.metadata["solana_source"])
+            except Exception as broadcast_error:
+                self.logger.error(f"Failed to broadcast opportunity: {broadcast_error}")
+                # Don't raise - still want to add to queue even if broadcast fails
                 
-            except Exception as data_error:
-                self.logger.error(f"Error creating opportunity data: {data_error}")
-                # Fallback to minimal data
-                opp_data = {
-                    "token_symbol": getattr(opportunity.token, 'symbol', 'UNKNOWN') or 'UNKNOWN',
-                    "token_address": getattr(opportunity.token, 'address', '') or '',
-                    "chain": opportunity.metadata.get("chain", "ethereum"),
-                    "risk_level": "unknown",
-                    "recommendation": "UNKNOWN",
-                    "confidence": "UNKNOWN", 
-                    "score": 0.0,
-                    "liquidity_usd": 0.0,
-                    "dex_name": "Unknown DEX",
-                    "pair_address": "",
-                    "detected_at": opportunity.detected_at.isoformat(),
-                    "reasons": [],
-                    "warnings": []
-                }
-                
-            # Broadcast to connected clients
-            await self.broadcast_message({
-                "type": "new_opportunity",
-                "data": opp_data
-            })
-            
-            self.logger.debug(f"Added opportunity: {token_symbol} (${liquidity_usd:,.2f} liquidity)")
-            
         except Exception as e:
-            self.logger.error(f"Error adding opportunity: {e}")
-            # Log the opportunity structure for debugging
-            try:
-                self.logger.debug(f"Opportunity structure: token={type(opportunity.token)}, liquidity={type(opportunity.liquidity)}")
-            except Exception:
-                self.logger.debug("Could not log opportunity structure")
+            self.logger.error(f"Failed to add opportunity: {e}")
+            raise
 
     async def update_analysis_rate(self, rate: int) -> None:
         """
@@ -285,6 +265,9 @@ class DashboardServer:
             
         Returns:
             True if added successfully, False if already exists
+            
+        Raises:
+            Exception: If watchlist addition fails
         """
         try:
             # Create opportunity object for watchlist
@@ -458,7 +441,12 @@ class DashboardServer:
             self.logger.debug(f"WebSocket cleanup complete. Remaining clients: {len(self.connected_clients)}")
     
     async def _periodic_cleanup_task(self) -> None:
-        """Periodic task to clean up dead WebSocket connections."""
+        """
+        Periodic task to clean up dead WebSocket connections.
+        
+        Raises:
+            Exception: If cleanup task fails critically
+        """
         while True:
             try:
                 await asyncio.sleep(30)  # Clean up every 30 seconds
@@ -468,7 +456,12 @@ class DashboardServer:
                 await asyncio.sleep(60)
     
     async def _cleanup_dead_connections(self) -> None:
-        """Clean up dead WebSocket connections."""
+        """
+        Clean up dead WebSocket connections.
+        
+        Raises:
+            Exception: If cleanup fails critically
+        """
         try:
             if not self.connected_clients:
                 return

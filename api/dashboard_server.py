@@ -23,6 +23,9 @@ from api.dashboard_models import (
 from api.dashboard_html import get_enhanced_dashboard_html
 from models.watchlist import watchlist_manager, WatchlistStatus
 from utils.logger import logger_manager
+from typing import List
+from datetime import datetime
+from api.dashboard_models import OpportunityResponse
 
 
 # Create FastAPI app
@@ -121,6 +124,7 @@ async def get_stats() -> dict:
         }
 
 
+
 @app.get("/api/opportunities", response_model=List[OpportunityResponse])
 async def get_opportunities() -> List[OpportunityResponse]:
     """
@@ -137,41 +141,115 @@ async def get_opportunities() -> List[OpportunityResponse]:
         
         # Get last 20 opportunities from queue
         recent_opportunities = list(dashboard_server.opportunities_queue)[-20:]
+        dashboard_server.logger.debug(f"Processing {len(recent_opportunities)} opportunities from queue")
         
         for opp in recent_opportunities:
             try:
-                # Calculate age in minutes
-                age_minutes = int((datetime.now() - opp.detected_at).total_seconds() / 60)
+                # Calculate age in minutes - handle different timestamp formats
+                try:
+                    if hasattr(opp, 'detected_at') and opp.detected_at:
+                        age_minutes = int((datetime.now() - opp.detected_at).total_seconds() / 60)
+                    elif hasattr(opp, 'timestamp') and opp.timestamp:
+                        age_minutes = int((datetime.now() - opp.timestamp).total_seconds() / 60)
+                    else:
+                        age_minutes = 0
+                except Exception:
+                    age_minutes = 0
                 
                 # Extract recommendation safely
                 recommendation = opp.metadata.get("recommendation", {})
                 
+                # Extract risk level safely - handle multiple sources
+                risk_level = "unknown"
+                try:
+                    # Try metadata first
+                    if "risk_level" in opp.metadata:
+                        risk_level = opp.metadata["risk_level"]
+                    # Try contract analysis
+                    elif hasattr(opp, 'contract_analysis') and opp.contract_analysis:
+                        if hasattr(opp.contract_analysis, 'risk_level'):
+                            if hasattr(opp.contract_analysis.risk_level, 'value'):
+                                risk_level = opp.contract_analysis.risk_level.value
+                            else:
+                                risk_level = str(opp.contract_analysis.risk_level)
+                except Exception as risk_error:
+                    dashboard_server.logger.debug(f"Risk level extraction failed: {risk_error}")
+                    risk_level = "unknown"
+                
+                # Extract liquidity safely
+                liquidity_usd = 0.0
+                try:
+                    if hasattr(opp, 'liquidity') and opp.liquidity:
+                        if hasattr(opp.liquidity, 'liquidity_usd'):
+                            liquidity_usd = float(opp.liquidity.liquidity_usd)
+                except Exception as liquidity_error:
+                    dashboard_server.logger.debug(f"Liquidity extraction failed: {liquidity_error}")
+                    liquidity_usd = 0.0
+                
+                # Extract token info safely
+                token_symbol = "UNKNOWN"
+                token_address = ""
+                try:
+                    if hasattr(opp, 'token') and opp.token:
+                        token_symbol = getattr(opp.token, 'symbol', 'UNKNOWN') or 'UNKNOWN'
+                        token_address = getattr(opp.token, 'address', '') or ''
+                except Exception as token_error:
+                    dashboard_server.logger.debug(f"Token extraction failed: {token_error}")
+                
+                # Extract score safely
+                score = 0.0
+                try:
+                    # Try recommendation score first
+                    if "score" in recommendation:
+                        score = float(recommendation["score"])
+                    # Try trading_score in metadata
+                    elif "trading_score" in opp.metadata:
+                        trading_score = opp.metadata["trading_score"]
+                        if isinstance(trading_score, dict) and "overall_score" in trading_score:
+                            score = float(trading_score["overall_score"])
+                        else:
+                            score = float(trading_score)
+                except Exception as score_error:
+                    dashboard_server.logger.debug(f"Score extraction failed: {score_error}")
+                    score = 0.0
+                
                 # Create response object with validation
                 opportunity_response = OpportunityResponse(
-                    token_symbol=opp.token.symbol or "UNKNOWN",
-                    token_address=opp.token.address,
+                    token_symbol=token_symbol,
+                    token_address=token_address,
                     chain=opp.metadata.get("chain", "ethereum").lower(),
-                    risk_level=opp.contract_analysis.risk_level.value if opp.contract_analysis else "unknown",
-                    recommendation=recommendation.get("action", "UNKNOWN"),
-                    confidence=recommendation.get("confidence", "UNKNOWN"),
-                    score=float(recommendation.get("score", 0.0)),
-                    liquidity_usd=float(opp.liquidity.liquidity_usd) if opp.liquidity else 0.0,
+                    risk_level=risk_level,
+                    recommendation=recommendation.get("action", "MONITOR"),
+                    confidence=recommendation.get("confidence", "LOW"),
+                    score=score,
+                    liquidity_usd=liquidity_usd,
                     age_minutes=age_minutes
                 )
                 
                 opportunities.append(opportunity_response)
+                dashboard_server.logger.debug(f"Successfully processed opportunity: {token_symbol}")
                 
             except Exception as e:
                 dashboard_server.logger.warning(f"Skipping malformed opportunity: {e}")
+                # Log the opportunity structure for debugging
+                dashboard_server.logger.debug(f"Opportunity structure: {type(opp)}")
+                if hasattr(opp, '__dict__'):
+                    dashboard_server.logger.debug(f"Opportunity dict: {opp.__dict__}")
                 continue
         
-        dashboard_server.logger.debug(f"Returning {len(opportunities)} opportunities")
+        dashboard_server.logger.info(f"Returning {len(opportunities)} opportunities to dashboard")
         return opportunities
         
     except Exception as e:
         dashboard_server.logger.error(f"Error getting opportunities: {e}")
+        import traceback
+        dashboard_server.logger.debug(f"Full traceback: {traceback.format_exc()}")
         # Return empty list instead of error to keep dashboard functional
         return []
+
+
+
+
 
 # Watchlist API endpoints
 @app.get("/api/watchlist")

@@ -275,7 +275,7 @@ class EnhancedTradingSystem:
             self.analyzers = {'contract': None, 'social': None, 'trading_scorer': None}
 
     async def _initialize_monitors(self) -> None:
-        """Enhanced monitor initialization with better callback handling."""
+        """Initialize blockchain monitors with proper Solana setup."""
         try:
             self.logger.info("Initializing blockchain monitors...")
             
@@ -297,19 +297,18 @@ class EnhancedTradingSystem:
             except Exception as e:
                 self.logger.warning(f"Base monitor failed: {e}")
             
-            # Solana monitor with enhanced settings
+            # Solana monitor with proper initialization
             try:
-                sol_monitor = SolanaMonitor(check_interval=10.0)  # Slower for stability
+                sol_monitor = SolanaMonitor(check_interval=10.0)
                 sol_monitor.add_callback(self._handle_opportunity)
                 
-                # Set additional properties if available
-                if hasattr(sol_monitor, 'set_scorer') and hasattr(self, 'analyzers'):
-                    sol_monitor.set_scorer(self.analyzers.get('trading_scorer'))
-                if hasattr(sol_monitor, 'set_auto_trading'):
-                    sol_monitor.set_auto_trading(self.auto_trading_enabled)
-                
-                self.monitors.append(sol_monitor)
-                self.logger.info("✅ Solana monitor initialized")
+                # CRITICAL FIX: Call initialize() method
+                if await sol_monitor.initialize():
+                    self.monitors.append(sol_monitor)
+                    self.logger.info("✅ Solana monitor initialized with working APIs")
+                else:
+                    self.logger.warning("❌ Solana monitor initialization failed - no working APIs")
+                    
             except Exception as e:
                 self.logger.warning(f"Solana monitor failed: {e}")
             
@@ -329,13 +328,24 @@ class EnhancedTradingSystem:
                 self.logger.error("No monitors initialized successfully")
                 raise Exception("Failed to initialize any monitors")
             
-            # Start test opportunity generation for dashboard verification
+            # OPTION 1: Remove test opportunities (for real monitoring only)
+            # Comment out these lines to disable test mode:
             self.logger.info("🧪 Starting test opportunity generation...")
             asyncio.create_task(self._generate_test_opportunities())
+            
+            # OPTION 2: Keep test opportunities but reduce them
+            # self.logger.info("🔍 Real monitoring active - waiting for genuine opportunities...")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize monitors: {e}")
             raise
+
+
+
+
+
+
+
 
     async def _initialize_dashboard(self) -> None:
         """Initialize web dashboard."""
