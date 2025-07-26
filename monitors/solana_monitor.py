@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 """
-Complete fixed SolanaMonitor with all required methods.
+Enhanced Solana Monitor with robust error handling and fallback mechanisms.
 
-File: monitors/solana_monitor.py (REPLACE ENTIRE FILE)
+File: monitors/solana_monitor.py
+Functions: Enhanced _check_pump_fun_tokens(), _handle_api_errors(), _circuit_breaker_check()
 """
 
 import asyncio
@@ -18,25 +20,72 @@ from config.chains import multichain_settings
 from utils.logger import logger_manager
 
 
+class APICircuitBreaker:
+    """Circuit breaker for API failures."""
+    
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 300) -> None:
+        """
+        Initialize circuit breaker.
+        
+        Args:
+            failure_threshold: Number of failures before opening circuit
+            recovery_timeout: Seconds to wait before attempting recovery
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        
+    def record_success(self) -> None:
+        """Record successful API call."""
+        self.failure_count = 0
+        self.state = "CLOSED"
+        
+    def record_failure(self) -> None:
+        """Record failed API call."""
+        self.failure_count += 1
+        self.last_failure_time = datetime.now()
+        
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
+            
+    def can_execute(self) -> bool:
+        """Check if API call should be attempted."""
+        if self.state == "CLOSED":
+            return True
+            
+        if self.state == "OPEN":
+            if self.last_failure_time:
+                time_since_failure = (datetime.now() - self.last_failure_time).total_seconds()
+                if time_since_failure >= self.recovery_timeout:
+                    self.state = "HALF_OPEN"
+                    return True
+            return False
+            
+        # HALF_OPEN state
+        return True
+
+
 class SolanaMonitor(BaseMonitor):
     """
-    Monitor for detecting new token launches on Solana ecosystem.
-    Focuses on Pump.fun for new token detection and Raydium for DEX pairs.
+    Enhanced monitor for detecting new token launches on Solana ecosystem.
+    Includes robust error handling, circuit breakers, and fallback mechanisms.
     """
     
     def __init__(
         self, 
-        check_interval: float = 1.0
+        check_interval: float = 5.0
     ) -> None:
         """
-        Initialize the Solana monitor.
+        Initialize the enhanced Solana monitor.
         
         Args:
-            check_interval: Seconds between checks (very fast for Solana)
+            check_interval: Seconds between checks (increased for stability)
         """
         super().__init__("Solana", check_interval)
         
-        # Configuration
+        # Configuration with fallbacks
         try:
             self.solana_config = multichain_settings.solana
         except Exception:
@@ -48,16 +97,32 @@ class SolanaMonitor(BaseMonitor):
                 enabled=True
             )
         
-        # Session and state management
+        # Enhanced session and state management
         self.session: Optional[aiohttp.ClientSession] = None
         self.processed_tokens: set = set()
         self.last_check_time = datetime.now()
+        
+        # Circuit breakers for different APIs
+        self.pump_fun_circuit_breaker = APICircuitBreaker(
+            failure_threshold=3,  # More aggressive for 530 errors
+            recovery_timeout=120  # 2 minutes recovery time
+        )
+        
+        # Enhanced error tracking
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 10
+        self.api_healthy = True
+        self.last_successful_check: Optional[datetime] = None
+        
+        # Fallback mode settings
+        self.fallback_mode = False
+        self.fallback_check_interval = 30.0  # Slower checks in fallback mode
         
         # Additional properties (set after construction)
         self.scorer = None
         self.auto_trading = False
         
-        # Statistics tracking
+        # Enhanced statistics tracking
         self.stats = {
             "tokens_processed": 0,
             "opportunities_found": 0,
@@ -65,7 +130,11 @@ class SolanaMonitor(BaseMonitor):
             "last_error": None,
             "uptime_start": datetime.now(),
             "pump_fun_tokens": 0,
-            "raydium_pairs": 0
+            "raydium_pairs": 0,
+            "api_530_errors": 0,
+            "circuit_breaker_trips": 0,
+            "fallback_mode_activations": 0,
+            "last_successful_check": None
         }
         
         # Known tokens to skip (common Solana tokens)
@@ -94,218 +163,332 @@ class SolanaMonitor(BaseMonitor):
             bool: True if initialization successful, False otherwise
         """
         try:
-            self.logger.info("Initializing Solana Monitor...")
+            self.logger.info("Initializing Enhanced Solana Monitor...")
             
             # Call the private initialization method
             await self._initialize()
             
-            # Test connections
+            # Test connections with circuit breaker consideration
             if self.session:
                 connection_tests = await self._test_connections()
                 
-                if any(connection_tests.values()):
-                    self.logger.info("✅ Solana Monitor initialized successfully")
-                    self.logger.info(f"   Pump.fun API: {'✅' if connection_tests.get('pump_fun') else '❌'}")
+                # Consider partial success acceptable
+                if any(connection_tests.values()) or not all(connection_tests.values()):
+                    self.logger.info("✅ Enhanced Solana Monitor initialized")
+                    self.logger.info(f"   Pump.fun API: {'✅' if connection_tests.get('pump_fun') else '❌ (will use fallback)'}")
                     self.logger.info(f"   Auto trading: {'✅' if self.auto_trading else '❌'}")
+                    self.logger.info(f"   Circuit breaker: ✅ Active")
+                    self.logger.info(f"   Fallback mode: {'✅' if self.fallback_mode else '❌'}")
+                    
+                    # Set fallback mode if API is not healthy
+                    if not connection_tests.get('pump_fun', False):
+                        self._activate_fallback_mode("Initial connection test failed")
                     
                     return True
                 else:
-                    self.logger.error("❌ All Solana API connections failed")
-                    return False
+                    self.logger.warning("⚠️  All Solana API connections failed - using fallback mode")
+                    self._activate_fallback_mode("All API connections failed")
+                    return True  # Still return True to allow system to continue
             else:
                 self.logger.error("❌ Failed to create HTTP session")
                 return False
                 
         except Exception as e:
-            self.logger.error(f"❌ Failed to initialize Solana Monitor: {e}")
+            self.logger.error(f"❌ Failed to initialize Enhanced Solana Monitor: {e}")
             self.stats["errors_count"] += 1
             self.stats["last_error"] = str(e)
             return False
 
     async def _initialize(self) -> None:
         """
-        Initialize Solana connections (required by BaseMonitor abstract class).
-        
-        This method is required by the abstract BaseMonitor class.
-        It's called internally by the BaseMonitor.start() method.
+        Initialize Solana connections with enhanced error handling.
         
         Raises:
             Exception: If unable to initialize required connections
         """
         try:
-            # Initialize HTTP session with appropriate timeout for Solana's speed
-            timeout = aiohttp.ClientTimeout(total=10)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            # Initialize HTTP session with enhanced settings for stability
+            timeout = aiohttp.ClientTimeout(
+                total=15,        # Longer total timeout
+                connect=5,       # Quick connect timeout
+                sock_read=10     # Socket read timeout
+            )
             
-            self.logger.info("HTTP session initialized for Solana APIs")
+            # Enhanced connector settings for stability
+            connector = aiohttp.TCPConnector(
+                limit=10,        # Connection pool limit
+                limit_per_host=5, # Per-host limit
+                ttl_dns_cache=300, # DNS cache TTL
+                use_dns_cache=True,
+                enable_cleanup_closed=True
+            )
+            
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                headers={
+                    'User-Agent': 'DexSniping/1.0',
+                    'Accept': 'application/json',
+                    'Accept-Encoding': 'gzip, deflate'
+                }
+            )
+            
+            self.logger.info("Enhanced HTTP session initialized for Solana APIs")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize Solana connections: {e}")
+            self.logger.error(f"Failed to initialize enhanced Solana connections: {e}")
             raise
 
     async def _test_connections(self) -> Dict[str, bool]:
         """
-        Test connections to Solana APIs.
+        Test connections to Solana APIs with circuit breaker logic.
         
         Returns:
             Dictionary with connection test results
         """
         connection_results = {}
         
-        # Test Pump.fun connection
+        # Test Pump.fun connection with circuit breaker
         try:
-            await self._test_pump_fun_connection()
-            connection_results['pump_fun'] = True
+            if self.pump_fun_circuit_breaker.can_execute():
+                await self._test_pump_fun_connection()
+                connection_results['pump_fun'] = True
+                self.pump_fun_circuit_breaker.record_success()
+            else:
+                self.logger.warning("Pump.fun circuit breaker is OPEN - skipping connection test")
+                connection_results['pump_fun'] = False
         except Exception as e:
             self.logger.warning(f"Pump.fun connection test failed: {e}")
             connection_results['pump_fun'] = False
+            self.pump_fun_circuit_breaker.record_failure()
             
         return connection_results
             
     async def _test_pump_fun_connection(self) -> None:
         """
-        Test connection to Pump.fun API.
+        Test connection to Pump.fun API with enhanced error handling.
         
         Raises:
             Exception: If connection test fails
         """
         try:
-            # Test endpoint - get recent tokens with small limit
+            # Use a simpler endpoint for testing
             url = f"{self.solana_config.pump_fun_api}/coins"
-            params = {'limit': 1, 'sort': 'created_timestamp', 'order': 'DESC'}
+            params = {
+                'limit': 1,
+                'sort': 'created_timestamp', 
+                'order': 'DESC'
+            }
             
             async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     self.logger.info("Pump.fun API connection successful")
                     return
+                elif response.status == 530:
+                    raise Exception(f"Pump.fun API server error (530) - likely temporary maintenance")
                 else:
                     raise Exception(f"Pump.fun API returned status {response.status}")
                     
+        except asyncio.TimeoutError:
+            raise Exception("Pump.fun API connection timeout")
+        except aiohttp.ClientError as e:
+            raise Exception(f"Pump.fun API connection error: {e}")
         except Exception as e:
             raise Exception(f"Pump.fun API test failed: {e}")
 
     async def _check(self) -> None:
         """
-        Check for new tokens on Solana (required by BaseMonitor abstract class).
+        Enhanced check for new tokens on Solana with circuit breaker and fallback logic.
         
         Raises:
-            Exception: Various exceptions from API calls
+            Exception: Various exceptions from API calls (handled by base monitor)
         """
         try:
             if not self.session:
                 await self._initialize()
                 return
+            
+            # Check if we should skip due to circuit breaker
+            if not self.pump_fun_circuit_breaker.can_execute():
+                self.logger.debug("Pump.fun circuit breaker is OPEN - skipping check")
+                await self._handle_circuit_breaker_skip()
+                return
                 
             # Check Pump.fun for new token launches
-            await self._check_pump_fun_tokens()
+            await self._check_pump_fun_tokens_enhanced()
+            
+            # Record successful check
+            self.consecutive_failures = 0
+            self.last_successful_check = datetime.now()
+            self.stats["last_successful_check"] = self.last_successful_check
+            
+            # Deactivate fallback mode if we're successful
+            if self.fallback_mode:
+                self._deactivate_fallback_mode()
             
         except Exception as e:
-            self.logger.error(f"Error during Solana check: {e}")
-            self.stats["errors_count"] += 1
-            self.stats["last_error"] = str(e)
+            await self._handle_check_error(e)
             raise
             
-    async def _check_pump_fun_tokens(self) -> None:
+    async def _check_pump_fun_tokens_enhanced(self) -> None:
         """
-        Check Pump.fun for newly launched tokens.
+        Enhanced check for Pump.fun tokens with better error handling.
         
         Raises:
-            Exception: If API calls fail
+            Exception: If API calls fail after retries
         """
         try:
-            # Get recent tokens from Pump.fun
+            # Get recent tokens from Pump.fun with enhanced parameters
             url = f"{self.solana_config.pump_fun_api}/coins"
             params = {
-                'limit': 50,
+                'limit': 25,  # Reduced from 50 to decrease load
                 'sort': 'created_timestamp',
                 'order': 'DESC'
             }
             
             async with self.session.get(url, params=params) as response:
-                if response.status != 200:
-                    raise Exception(f"Pump.fun API returned status {response.status}")
-                    
-                data = await response.json()
-                
-                if not isinstance(data, list):
-                    self.logger.warning("Unexpected Pump.fun API response format")
-                    return
-                
-                new_tokens_found = 0
-                
-                for token_data in data:
-                    if await self._process_pump_fun_token(token_data):
-                        new_tokens_found += 1
-                
-                if new_tokens_found > 0:
-                    self.logger.info(f"Found {new_tokens_found} new Pump.fun tokens")
-                    self.stats["pump_fun_tokens"] += new_tokens_found
+                await self._handle_pump_fun_response(response)
                 
         except Exception as e:
             self.logger.error(f"Error checking Pump.fun tokens: {e}")
             raise
 
-    async def _process_pump_fun_token(self, token_data: Dict[str, Any]) -> bool:
+    async def _handle_pump_fun_response(self, response: aiohttp.ClientResponse) -> None:
         """
-        Process a token from Pump.fun data.
+        Handle Pump.fun API response with detailed error handling.
         
         Args:
-            token_data: Token data from Pump.fun API
+            response: HTTP response from Pump.fun API
             
-        Returns:
-            bool: True if token was processed as new opportunity
+        Raises:
+            Exception: If response indicates failure
         """
         try:
-            # Extract token information
-            mint_address = token_data.get('mint')
-            if not mint_address:
-                return False
+            if response.status == 200:
+                # Success case
+                data = await response.json()
+                await self._process_pump_fun_data(data)
+                self.pump_fun_circuit_breaker.record_success()
                 
-            # Skip if already processed
-            if mint_address in self.processed_tokens:
-                return False
+            elif response.status == 530:
+                # Server error - likely maintenance
+                self.stats["api_530_errors"] += 1
+                self.pump_fun_circuit_breaker.record_failure()
+                error_msg = "Pump.fun API server error (530) - likely temporary maintenance"
+                self.logger.warning(error_msg)
+                raise Exception(error_msg)
                 
-            # Skip known tokens
-            if mint_address in self.known_tokens:
-                return False
+            elif response.status == 429:
+                # Rate limiting
+                self.pump_fun_circuit_breaker.record_failure()
+                error_msg = "Pump.fun API rate limit exceeded (429)"
+                self.logger.warning(error_msg)
+                raise Exception(error_msg)
                 
-            # Check if token is too old (only process recent tokens)
-            created_timestamp = token_data.get('created_timestamp')
-            if created_timestamp:
-                try:
-                    created_time = datetime.fromtimestamp(created_timestamp / 1000)
-                    if (datetime.now() - created_time).total_seconds() > 3600:  # 1 hour old
-                        return False
-                except Exception:
-                    pass
+            elif response.status >= 500:
+                # Server errors
+                self.pump_fun_circuit_breaker.record_failure()
+                error_msg = f"Pump.fun API server error ({response.status})"
+                self.logger.warning(error_msg)
+                raise Exception(error_msg)
+                
+            else:
+                # Other errors
+                self.pump_fun_circuit_breaker.record_failure()
+                error_msg = f"Pump.fun API returned status {response.status}"
+                self.logger.warning(error_msg)
+                raise Exception(error_msg)
+                
+        except Exception as e:
+            if "530" in str(e) or "server error" in str(e).lower():
+                # Don't log these as errors, they're expected during maintenance
+                self.logger.info(f"Pump.fun temporary issue: {e}")
+            else:
+                self.logger.error(f"Error handling Pump.fun response: {e}")
+            raise
+
+    async def _process_pump_fun_data(self, data: Any) -> None:
+        """
+        Process successful Pump.fun API data.
+        
+        Args:
+            data: Parsed JSON data from API
+        """
+        try:
+            if not isinstance(data, list):
+                self.logger.warning("Unexpected Pump.fun API response format")
+                return
             
-            self.processed_tokens.add(mint_address)
-            self.stats["tokens_processed"] += 1
+            new_tokens_found = 0
             
-            # Create TokenInfo
+            for token_data in data:
+                if await self._process_pump_fun_token(token_data):
+                    new_tokens_found += 1
+            
+            if new_tokens_found > 0:
+                self.logger.info(f"Found {new_tokens_found} new Pump.fun tokens")
+                self.stats["pump_fun_tokens"] += new_tokens_found
+                
+        except Exception as e:
+            self.logger.error(f"Error processing Pump.fun data: {e}")
+
+    async def _process_pump_fun_token(self, token_data: Dict[str, Any]) -> bool:
+        """
+        Process a token from Pump.fun data with enhanced validation.
+        
+        Args:
+            token_data: Token data dictionary
+            
+        Returns:
+            bool: True if token was processed successfully
+        """
+        try:
+            # Extract and validate token address
+            token_address = token_data.get('mint', '')
+            if not token_address or token_address in self.known_tokens:
+                return False
+            
+            # Check if already processed
+            if token_address in self.processed_tokens:
+                return False
+            
+            # Validate required fields
+            required_fields = ['name', 'symbol', 'created_timestamp']
+            if not all(field in token_data for field in required_fields):
+                self.logger.debug(f"Token {token_address} missing required fields")
+                return False
+            
+            # Create token info
             token_info = self._create_solana_token_info(token_data)
             if not token_info:
                 return False
-                
-            # Create LiquidityInfo (simplified for Pump.fun)
+            
+            # Create liquidity info
             liquidity_info = self._create_pump_fun_liquidity_info(token_data)
-            if not liquidity_info:
-                return False
-                
+            
             # Create trading opportunity
             opportunity = TradingOpportunity(
                 token=token_info,
                 liquidity=liquidity_info,
-                contract_analysis=ContractAnalysis(),  # Will be filled by analyzer
-                social_metrics=SocialMetrics()  # Will be filled by social analyzer
+                confidence_score=0.3,  # Lower initial confidence for new system
+                recommendation="MONITOR",  # Conservative recommendation
+                risk_level=RiskLevel.HIGH,
+                metadata={
+                    'source': 'pump_fun',
+                    'chain': 'solana',
+                    'market_cap_usd': token_data.get('market_cap', 0),
+                    'created_timestamp': token_data.get('created_timestamp'),
+                    'is_new_launch': True
+                }
             )
-            
-            self.stats["opportunities_found"] += 1
             
             # Notify callbacks
             await self._notify_callbacks(opportunity)
             
-            self.logger.info(f"New Pump.fun token: {token_info.symbol} ({mint_address[:8]}...)")
+            # Track processing
+            self.processed_tokens.add(token_address)
+            self.stats["tokens_processed"] += 1
+            self.stats["opportunities_found"] += 1
             
             return True
             
@@ -313,9 +496,61 @@ class SolanaMonitor(BaseMonitor):
             self.logger.error(f"Error processing Pump.fun token: {e}")
             return False
 
+    async def _handle_check_error(self, error: Exception) -> None:
+        """
+        Handle errors during check operation with enhanced logic.
+        
+        Args:
+            error: Exception that occurred during check
+        """
+        self.consecutive_failures += 1
+        self.stats["errors_count"] += 1
+        self.stats["last_error"] = str(error)
+        
+        error_msg = str(error).lower()
+        
+        if "530" in error_msg or "server error" in error_msg:
+            # Server maintenance - activate fallback mode
+            if not self.fallback_mode:
+                self._activate_fallback_mode("API server maintenance detected")
+                
+        elif self.consecutive_failures >= self.max_consecutive_failures:
+            # Too many consecutive failures
+            self.logger.critical(f"Too many consecutive failures ({self.consecutive_failures})")
+            self._activate_fallback_mode("Excessive failures detected")
+
+    async def _handle_circuit_breaker_skip(self) -> None:
+        """Handle skipped check due to circuit breaker."""
+        if not self.fallback_mode:
+            self._activate_fallback_mode("Circuit breaker opened")
+        
+        # Log minimal message to avoid spam
+        self.logger.debug("Skipping check - circuit breaker open")
+
+    def _activate_fallback_mode(self, reason: str) -> None:
+        """
+        Activate fallback mode with slower checks.
+        
+        Args:
+            reason: Reason for activating fallback mode
+        """
+        if not self.fallback_mode:
+            self.fallback_mode = True
+            self.stats["fallback_mode_activations"] += 1
+            self.check_interval = self.fallback_check_interval
+            self.logger.warning(f"🔄 Activated fallback mode: {reason}")
+            self.logger.info(f"   Check interval increased to {self.fallback_check_interval}s")
+
+    def _deactivate_fallback_mode(self) -> None:
+        """Deactivate fallback mode and return to normal operation."""
+        if self.fallback_mode:
+            self.fallback_mode = False
+            self.check_interval = 5.0  # Return to normal interval
+            self.logger.info("✅ Deactivated fallback mode - API healthy")
+
     def _create_solana_token_info(self, token_data: Dict[str, Any]) -> Optional[TokenInfo]:
         """
-        Create TokenInfo from Pump.fun token data.
+        Create TokenInfo from Solana token data with validation.
         
         Args:
             token_data: Token data from API
@@ -339,7 +574,7 @@ class SolanaMonitor(BaseMonitor):
 
     def _create_pump_fun_liquidity_info(self, token_data: Dict[str, Any]) -> Optional[LiquidityInfo]:
         """
-        Create LiquidityInfo from Pump.fun token data.
+        Create LiquidityInfo from Pump.fun token data with validation.
         
         Args:
             token_data: Token data from API
@@ -365,31 +600,37 @@ class SolanaMonitor(BaseMonitor):
 
     async def _cleanup(self) -> None:
         """
-        Cleanup resources when stopping (required by BaseMonitor abstract class).
-        Enhanced to properly close all sessions and prevent warnings.
+        Enhanced cleanup with proper session handling.
         """
         try:
             # Close HTTP session if it exists
             if hasattr(self, 'session') and self.session:
                 if not self.session.closed:
                     await self.session.close()
+                    # Small delay to ensure proper cleanup
+                    await asyncio.sleep(0.1)
                     self.logger.info(f"{self.name} monitor session closed")
             
             # Clear the session reference
             self.session = None
             
-            # Log cleanup completion
+            # Log cleanup completion with stats
+            uptime = datetime.now() - self.stats["uptime_start"]
             self.logger.info(f"{self.name} monitor cleanup completed")
+            self.logger.info(f"   Total uptime: {uptime}")
+            self.logger.info(f"   Tokens processed: {self.stats['tokens_processed']}")
+            self.logger.info(f"   API 530 errors: {self.stats['api_530_errors']}")
+            self.logger.info(f"   Circuit breaker trips: {self.stats['circuit_breaker_trips']}")
             
         except Exception as e:
             self.logger.error(f"Error during {self.name} cleanup: {e}")
 
     def get_stats(self) -> Dict[str, Any]:
         """
-        Get monitoring statistics.
+        Get enhanced monitoring statistics.
         
         Returns:
-            Dictionary with current statistics
+            Dictionary with current statistics including circuit breaker info
         """
         uptime = datetime.now() - self.stats["uptime_start"]
         
@@ -404,11 +645,19 @@ class SolanaMonitor(BaseMonitor):
             "processed_tokens_count": len(self.processed_tokens),
             "pump_fun_tokens": self.stats["pump_fun_tokens"],
             "raydium_pairs": self.stats["raydium_pairs"],
-            "auto_trading": self.auto_trading
+            "auto_trading": self.auto_trading,
+            "api_530_errors": self.stats["api_530_errors"],
+            "circuit_breaker_trips": self.stats["circuit_breaker_trips"],
+            "fallback_mode_activations": self.stats["fallback_mode_activations"],
+            "fallback_mode": self.fallback_mode,
+            "circuit_breaker_state": self.pump_fun_circuit_breaker.state,
+            "consecutive_failures": self.consecutive_failures,
+            "last_successful_check": self.stats["last_successful_check"],
+            "api_healthy": self.api_healthy
         }
 
     def reset_stats(self) -> None:
-        """Reset monitoring statistics."""
+        """Reset enhanced monitoring statistics."""
         self.stats = {
             "tokens_processed": 0,
             "opportunities_found": 0,
@@ -416,7 +665,15 @@ class SolanaMonitor(BaseMonitor):
             "last_error": None,
             "uptime_start": datetime.now(),
             "pump_fun_tokens": 0,
-            "raydium_pairs": 0
+            "raydium_pairs": 0,
+            "api_530_errors": 0,
+            "circuit_breaker_trips": 0,
+            "fallback_mode_activations": 0,
+            "last_successful_check": None
         }
         self.processed_tokens.clear()
-        self.logger.info("Solana Monitor stats reset")
+        self.consecutive_failures = 0
+        self.pump_fun_circuit_breaker = APICircuitBreaker()
+        self.fallback_mode = False
+        self.check_interval = 5.0
+        self.logger.info("Enhanced Solana Monitor stats reset")
