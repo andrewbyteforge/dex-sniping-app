@@ -444,7 +444,6 @@ class BaseChainMonitor(BaseMonitor):
                 symbol=symbol,
                 decimals=decimals,
                 total_supply=total_supply,
-                chain="base",
                 discovered_at=datetime.now()
             )
             

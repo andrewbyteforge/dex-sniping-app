@@ -251,6 +251,7 @@ class NewTokenMonitor(BaseMonitor):
     ) -> List[Dict[str, Any]]:
         """
         Get PairCreated events from the factory contract.
+        Fixed to use correct Web3.py API and avoid create_filter issues.
         
         Args:
             from_block: Starting block number
@@ -263,23 +264,72 @@ class NewTokenMonitor(BaseMonitor):
             Exception: If unable to fetch events
         """
         try:
-            event_filter = self.uniswap_factory.events.PairCreated.create_filter(
-                fromBlock=from_block,
-                toBlock=to_block
-            )
+            # Use Web3.py's direct eth.get_logs instead of create_filter
+            event_signature_bytes = self.w3.keccak(text="PairCreated(address,address,address,uint256)")
+            event_signature = event_signature_bytes.hex()
             
-            events = event_filter.get_all_entries()
+            if not event_signature.startswith('0x'):
+                event_signature = '0x' + event_signature
             
-            if events:
+            factory_address = self.factory_addresses.get(self.chain)
+            if not factory_address:
+                self.logger.error(f"No factory address for chain: {self.chain}")
+                return []
+            
+            filter_params = {
+                'fromBlock': from_block,
+                'toBlock': to_block,
+                'address': factory_address,
+                'topics': [event_signature]
+            }
+            
+            logs = self.w3.eth.get_logs(filter_params)
+            
+            if logs:
                 self.logger.info(
-                    f"Found {len(events)} new pairs on {self.chain} "
+                    f"Found {len(logs)} new pairs on {self.chain} "
                     f"(blocks {from_block}-{to_block})"
                 )
-                
-            return events
+            
+            # Parse logs manually
+            parsed_events = []
+            for log in logs:
+                try:
+                    if len(log['topics']) >= 3:
+                        token0_raw = '0x' + log['topics'][1].hex()[-40:]
+                        token1_raw = '0x' + log['topics'][2].hex()[-40:]
+                        
+                        data_hex = log['data'].hex()
+                        if not data_hex.startswith('0x'):
+                            data_hex = '0x' + data_hex
+                        
+                        if len(data_hex) >= 66:
+                            pair_address_raw = '0x' + data_hex[26:66]
+                        else:
+                            continue
+                        
+                        token0 = self.w3.to_checksum_address(token0_raw)
+                        token1 = self.w3.to_checksum_address(token1_raw)
+                        pair_address = self.w3.to_checksum_address(pair_address_raw)
+                        
+                        parsed_event = {
+                            'args': {
+                                'token0': token0,
+                                'token1': token1,
+                                'pair': pair_address
+                            },
+                            'blockNumber': log['blockNumber']
+                        }
+                        parsed_events.append(parsed_event)
+                        
+                except Exception as parse_error:
+                    self.logger.warning(f"Error parsing {self.chain} event log: {parse_error}")
+                    continue
+                    
+            return parsed_events
             
         except Exception as e:
-            self.logger.error(f"Failed to get events: {e}")
+            self.logger.error(f"Failed to get {self.chain} events: {e}")
             return []
 
     async def _process_pair_event(self, event: Dict[str, Any]) -> None:
@@ -413,7 +463,6 @@ class NewTokenMonitor(BaseMonitor):
                 symbol=symbol,
                 decimals=decimals,
                 total_supply=total_supply,
-                chain=self.chain,
                 discovered_at=datetime.now()
             )
             
